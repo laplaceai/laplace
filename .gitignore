@@ -1,0 +1,7 @@
+.env
+.env.*
+secrets/
+node_modules/
+.wrangler/
+.dev.vars
+*.log
