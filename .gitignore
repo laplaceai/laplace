@@ -5,3 +5,12 @@ node_modules/
 .wrangler/
 .dev.vars
 *.log
+
+# research
+research/runs/
+research/.cache/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
