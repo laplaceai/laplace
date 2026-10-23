@@ -11,6 +11,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from laplace_research.learning import fit_shrink, hedge
 from laplace_research.scoring import binary_log_loss, block_bootstrap, brier, log_loss, skill
 
 REFERENCE = "laplace_vol"
@@ -79,6 +80,25 @@ def report(run_dir: Path) -> dict[str, Any]:
     for name, members in pools.items():
         forecasters[name] = [linear_pool([forecasters[m][j] for m in members]) for j in range(len(ids))]
 
+    # Learning layers. Shrinkage is fitted on the first half; hedge weights only use settled outcomes.
+    outcomes = [c["outcome"]["move24"] for c in common]
+    reference = [f["move24"] for f in forecasters[REFERENCE]]
+    shrink_weights: dict[str, float] = {}
+    for a in agents:
+        moves = [f["move24"] for f in forecasters[a]]
+        w = fit_shrink(moves[:half], reference[:half], outcomes[:half], log_loss)
+        shrink_weights[a] = w
+        forecasters[f"shrunk:{a}"] = [
+            {"move24": {k: w * m[k] + (1 - w) * r[k] for k in m}, "big4": f["big4"]}
+            for m, r, f in zip(moves, reference, forecasters[a], strict=True)
+        ]
+    times = [c["card"]["ts"] for c in common]
+    for label, names in (("hedge:agents", agents), ("hedge:agents+reference", [*agents, REFERENCE])):
+        pooled = hedge({n: [f["move24"] for f in forecasters[n]] for n in names}, outcomes, times, 24 * 3600, log_loss)
+        forecasters[label] = [
+            {"move24": p, "big4": f["big4"]} for p, f in zip(pooled, forecasters[REFERENCE], strict=True)
+        ]
+
     ll: dict[str, list[float]] = {}
     ll4: dict[str, list[float]] = {}
     rows: list[dict[str, Any]] = []
@@ -138,6 +158,7 @@ def report(run_dir: Path) -> dict[str, Any]:
             [by_name[a]["skill_move24_first_half"] for a in agents],
             [by_name[a]["skill_move24_second_half"] for a in agents],
         ),
+        "shrink_weights": shrink_weights,
         "usage_input_tokens": sum(
             int(f.get("usage", {}).get("input_tokens") or f.get("usage", {}).get("prompt_tokens") or 0)
             for a in agents
@@ -179,6 +200,10 @@ def render(s: dict[str, Any]) -> str:
         f"across models {fmt(ec['across_models'])}.",
         f"Persistence (Spearman, agent skill 1st half vs 2nd half): {s['persistence_spearman']:+.2f}.",
         f"Input tokens: {s['usage_input_tokens']:,}.",
+        "",
+        "Shrinkage weight on each agent (fitted on the 1st half; 0 = only the reference survives): "
+        + ", ".join(f"{a} {w:.2f}" for a, w in sorted(s["shrink_weights"].items(), key=lambda x: -x[1]))
+        + ". Judge the shrunk:* rows on the 2nd-half column only.",
         "",
     ]
     return "\n".join(lines)
