@@ -21,6 +21,10 @@ class InferenceError(RuntimeError):
     pass
 
 
+class AuthError(InferenceError):
+    """The credentials were rejected. Retrying or continuing the run would only fail again."""
+
+
 @dataclass(frozen=True, slots=True)
 class Credentials:
     account_id: str
@@ -64,6 +68,8 @@ class WorkersAI:
                             raise InferenceError(f"{model}: {body.get('errors')}")
                         result: dict[str, Any] = body["result"]
                         return result
+                    if response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}:
+                        raise AuthError(f"{model}: HTTP {response.status_code}, credentials rejected")
                     if response.status_code not in RETRY_STATUS or attempt == self._max_attempts:
                         raise InferenceError(f"{model}: HTTP {response.status_code} {response.text[:300]}")
                 await asyncio.sleep(min(30.0, 2**attempt) * (0.5 + random.random()))
