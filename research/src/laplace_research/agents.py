@@ -23,6 +23,8 @@ MODELS = {
     "deepseek": DEEPSEEK,
     "deepseek-fast": DEEPSEEK,
 }
+# Workers AI rate-limits DeepSeek (HTTP 429) at 16 parallel requests; Clef ran fine at 16.
+MODEL_CONCURRENCY = {DEEPSEEK: 4}
 # Chat-model options per agent model. Unbounded reasoning spends the whole token budget re-deriving statistics the
 # card already holds, so reasoning is capped.
 CHAT_OPTIONS: dict[str, dict[str, Any]] = {

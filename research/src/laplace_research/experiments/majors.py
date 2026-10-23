@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from laplace_research import baselines
-from laplace_research.agents import Agent, ForecastParseError, forecast
+from laplace_research.agents import MODEL_CONCURRENCY, Agent, ForecastParseError, forecast
 from laplace_research.cards import WEEK, Card, Outcome, build_card, settle
 from laplace_research.data.candles import HOUR, Candle, fetch_hourly
 from laplace_research.inference import AuthError, Credentials, InferenceError, WorkersAI
@@ -98,7 +98,7 @@ async def _run_agents(rows: Sequence[dict[str, Any]], agents: Iterable[Agent], o
         if (agent.agent_id, row["card"]["card_id"]) not in done
     ]
     print(f"{len(jobs)} forecasts to run ({len(done)} already done)", file=sys.stderr)
-    async with WorkersAI(Credentials.from_env(), concurrency=concurrency) as ai:
+    async with WorkersAI(Credentials.from_env(), concurrency=concurrency, model_limits=MODEL_CONCURRENCY) as ai:
         with out.open("a") as fh:
 
             async def one(agent: Agent, card: Card) -> None:
