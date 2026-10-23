@@ -16,10 +16,18 @@ from laplace_research.cards import BIG_MOVE_4H, MOVE_BINS, MOVE_LABELS, Card
 from laplace_research.inference import WorkersAI
 from laplace_research.scoring import normalize
 
+DEEPSEEK = "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
 MODELS = {
     "clef-flash": "@cf/cloudflare/clef-flash",
     "clef": "@cf/cloudflare/clef",
-    "deepseek": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "deepseek": DEEPSEEK,
+    "deepseek-fast": DEEPSEEK,
+}
+# Chat-model options per agent model. Unbounded reasoning spends the whole token budget re-deriving statistics the
+# card already holds, so reasoning is capped.
+CHAT_OPTIONS: dict[str, dict[str, Any]] = {
+    "deepseek": {"reasoning_effort": "low", "max_completion_tokens": 4000},
+    "deepseek-fast": {"reasoning_effort": "none", "max_completion_tokens": 400},
 }
 
 DIRECTIVES = {
@@ -125,11 +133,15 @@ async def _forecast_chat(ai: WorkersAI, agent: Agent, card: Card) -> Forecast:
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps({"card": card.features}) + "\n\n" + CHAT_FORMAT},
             ],
-            "max_completion_tokens": 2000,
             "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            **CHAT_OPTIONS[agent.model],
         },
     )
-    content = result["choices"][0]["message"]["content"] or ""
+    choice = result["choices"][0]
+    content = choice["message"].get("content") or ""
+    if not content and choice.get("finish_reason") == "length":
+        raise ForecastParseError("reply truncated: token budget spent on reasoning")
     return parse_chat_forecast(content, result.get("usage", {}))
 
 
