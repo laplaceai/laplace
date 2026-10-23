@@ -47,13 +47,15 @@ def linear_pool(members: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def load(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, dict[str, Any]]], int]:
     cards = [json.loads(line) for line in (run_dir / "cards.jsonl").read_text().splitlines()]
     forecasts: dict[str, dict[str, dict[str, Any]]] = {}
-    errors = 0
+    failed: set[tuple[str, str]] = set()
     for line in (run_dir / "forecasts.jsonl").read_text().splitlines():
         row = json.loads(line)
         if "error" in row:
-            errors += 1
-            continue
-        forecasts.setdefault(row["agent"], {})[row["card_id"]] = row
+            failed.add((row["agent"], row["card_id"]))
+        else:
+            forecasts.setdefault(row["agent"], {})[row["card_id"]] = row
+    # A failure that a resumed run later answered is not a failure.
+    errors = sum(1 for agent, card_id in failed if card_id not in forecasts.get(agent, {}))
     return cards, forecasts, errors
 
 
