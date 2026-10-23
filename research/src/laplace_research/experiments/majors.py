@@ -33,6 +33,7 @@ def default_agents() -> list[Agent]:
     directives = ["none", "plain", "volatility", "momentum", "reversion", "fat_tails"]
     agents = [Agent(model, d) for model in ("clef-flash", "clef") for d in directives]
     agents += [Agent("deepseek", d) for d in ("plain", "volatility")]
+    agents.append(Agent("deepseek-fast", "plain"))
     return agents
 
 

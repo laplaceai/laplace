@@ -167,10 +167,14 @@ def render(s: dict[str, Any]) -> str:
             f"{r['skill_big4']:+.3f} | {lo4:+.3f}…{hi4:+.3f} | {r['mean_p_big4']:.3f} |"
         )
     ec = s["error_correlation"]
+
+    def fmt(x: float | None) -> str:
+        return "n/a" if x is None else f"{x:.2f}"
+
     lines += [
         "",
-        f"Mean correlation of per-card excess loss: within a model {ec['within_model']:.2f}, "
-        f"across models {ec['across_models']:.2f}.",
+        f"Mean correlation of per-card excess loss: within a model {fmt(ec['within_model'])}, "
+        f"across models {fmt(ec['across_models'])}.",
         f"Persistence (Spearman, agent skill 1st half vs 2nd half): {s['persistence_spearman']:+.2f}.",
         f"Input tokens: {s['usage_input_tokens']:,}.",
         "",
