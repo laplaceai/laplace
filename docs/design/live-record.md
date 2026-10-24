@@ -75,7 +75,7 @@ full), the forecasters with their identities, any failures, the leaf encoding, t
 1. `keccak256(manifest.json)` equals the manifest hash in the issue's `Committed` event, the root equals
    `rootOf(issue)`, and the commitment's block falls inside the issue's window.
 2. The leaves rebuilt from `forecasts.json` give that root, and every pool's forecasts are its members' forecasts
-   mixed with its weights. `laplace-engine verify` does steps 2 and 3 from the files alone.
+   mixed with its weights. `laplace-engine verify --issue N` does steps 1 and 2 from the public files and the chain.
 3. Public programs rerun on the candles the manifest identifies give the published forecasts (identical with the
    locked dependencies; floating-point differences between library versions can move a rounding by a basis point).
 4. Once a private program is revealed, its source hashes to its identity, and rerunning it reproduces its record.

@@ -1,0 +1,9 @@
+[Unit]
+Description=Laplace: the hourly issue, 30 seconds after every hour
+
+[Timer]
+OnCalendar=*-*-* *:00:30 UTC
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
