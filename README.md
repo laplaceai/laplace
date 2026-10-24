@@ -20,4 +20,4 @@ Pre-season under construction. Nothing is live yet.
 
 ## No token yet
 There is no Laplace token. Anything claiming to be one before an announcement on
-[@laplacerh](https://x.com/laplacerh) is not ours.
+[@laplaceproto](https://x.com/laplaceproto) is not ours.
