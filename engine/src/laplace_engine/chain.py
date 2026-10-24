@@ -1,7 +1,10 @@
 """Committing sealed issues to LaplaceLedger on Robinhood Chain, and reading commitments back.
 
-The commit key signs one kind of transaction only: ``commit`` on the ledger. Before signing, the ledger is asked for
-the issue's root, so a rerun after a crash recovers the existing commitment instead of sending a second transaction.
+The commit key signs one kind of transaction only: ``commit`` on the ledger. Every step is safe to repeat:
+- before signing, the ledger is asked for the issue's root, so a rerun recovers an existing commitment;
+- the signed transaction's hash is journaled before it is sent, so a lost reply, a timeout or a crash can always be
+  resolved from the chain, and a retry waits for the journaled transaction instead of signing a second one;
+- a failed send is never taken as proof that the transaction did not arrive: the node is asked for it by hash.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from eth_hash.auto import keccak
 
+from laplace_engine.files import write_atomic
 from laplace_engine.release import canonical, hex32
 
 CHAIN_ID = 4663
@@ -153,9 +157,12 @@ class Ledger:
     def block_timestamp(self, number: int) -> int:
         return int(self._rpc.call("eth_getBlockByNumber", hex(number), False)["timestamp"], 16)
 
+    def head(self) -> int:
+        return int(self._rpc.call("eth_blockNumber"), 16)
+
     def block_at(self, timestamp: int) -> int:
         """The last block at or before ``timestamp`` (binary search from the ledger's deployment)."""
-        lo, hi = LEDGER_BLOCK, int(self._rpc.call("eth_blockNumber"), 16)
+        lo, hi = LEDGER_BLOCK, self.head()
         if self.block_timestamp(hi) <= timestamp:
             return hi
         while lo < hi:
@@ -167,16 +174,24 @@ class Ledger:
         return lo
 
     def find(self, issue: int) -> Commitment | None:
-        """The issue's ``Committed`` event, searched in the blocks of its commit window."""
+        """The issue's ``Committed`` event, searched in exactly the blocks of its commit window."""
         opens = issue * 3600
-        first, last = self.block_at(opens), self.block_at(opens + COMMIT_WINDOW_S) + 1
+        first = (
+            self.block_at(opens - 1) + 1
+        )  # several blocks can share a timestamp: start at the first one in the window
+        last = min(self.block_at(opens + COMMIT_WINDOW_S - 1), self.head())
+        if first > last:
+            return None
         topics = ["0x" + COMMITTED.hex(), "0x" + issue.to_bytes(32, "big").hex()]
         logs = self._rpc.call(
             "eth_getLogs", {"address": self.address, "fromBlock": hex(first), "toBlock": hex(last), "topics": topics}
         )
         if not logs:
             return None
-        event = logs[0]
+        return self._commitment(issue, logs[0], logs[0]["transactionHash"])
+
+    def _commitment(self, issue: int, event: dict[str, Any], tx_hash: str) -> Commitment:
+        """A commitment as the chain recorded it, from its ``Committed`` event."""
         root, manifest, leaves = decode(["bytes32", "bytes32", "uint32"], bytes.fromhex(event["data"][2:]))
         block = int(event["blockNumber"], 16)
         return Commitment(
@@ -184,7 +199,7 @@ class Ledger:
             hex32(root),
             hex32(manifest),
             int(leaves),
-            event["transactionHash"],
+            tx_hash,
             block,
             self.block_timestamp(block),
             self.chain_id,
@@ -199,17 +214,22 @@ class Ledger:
         manifest_hash: bytes,
         leaves: int,
         *,
+        journal: Path,
         timeout_s: float = 120.0,
     ) -> Commitment:
-        """Commit an issue, or return its commitment if this exact root is committed already."""
+        """Commit an issue, or return its commitment if it is committed already with this root, manifest and size.
+
+        ``journal`` keeps the hash of the signed transaction; it is written before anything is sent.
+        """
         existing = self.root_of(issue)
         if existing == root:
-            found = self.find(issue)
-            if found is not None:
-                log.info("issue %d was already committed in %s", issue, found.tx)
-                return found
-        elif existing != bytes(32):
+            return self.recover(issue, root, manifest_hash, leaves, journal=journal)
+        if existing != bytes(32):
             raise RPCError(f"issue {issue} is committed with another root, 0x{existing.hex()}")
+        if journal.exists():  # signed in an earlier attempt: wait for that transaction rather than signing another
+            tx_hash = json.loads(journal.read_bytes())["tx"]
+            if self._rpc.call("eth_getTransactionByHash", tx_hash) is not None:
+                return self._matching(self._finish(issue, tx_hash, timeout_s), root, manifest_hash, leaves)
         if self.committer().lower() != account.address.lower():
             raise ValueError("this key is not the ledger's committer")
 
@@ -233,22 +253,50 @@ class Ledger:
             "maxPriorityFeePerGas": 0,
         }
         signed = account.sign_transaction(tx)
-        tx_hash: str = self._rpc.call("eth_sendRawTransaction", "0x" + signed.raw_transaction.hex())
+        tx_hash = "0x" + bytes(signed.hash).hex()
+        write_atomic(journal, canonical({"issue": issue, "tx": tx_hash, "nonce": tx["nonce"]}))
+        try:
+            self._rpc.call("eth_sendRawTransaction", "0x" + bytes(signed.raw_transaction).hex())
+        except RPCError as exc:
+            # The node may have accepted it and the reply was lost; a resend then reads "already known".
+            if self._rpc.call("eth_getTransactionByHash", tx_hash) is None:
+                raise
+            log.warning("issue %d: sending %s reported %s, but the node has it", issue, tx_hash, exc)
+        return self._matching(self._finish(issue, tx_hash, timeout_s), root, manifest_hash, leaves)
+
+    def recover(self, issue: int, root: bytes, manifest_hash: bytes, leaves: int, *, journal: Path) -> Commitment:
+        """The commitment of an issue whose root is on-chain, read from the chain (its event, or else the journaled
+        transaction's receipt). Refuses one whose manifest hash or size differs from the local files."""
+        found = self.find(issue)
+        if found is None and journal.exists():
+            found = self._finish(issue, json.loads(journal.read_bytes())["tx"], 0.0)
+        if found is None:
+            raise RPCError(f"issue {issue}'s root is on-chain but its Committed event was not found")
+        log.info("issue %d: recovered its commitment in %s", issue, found.tx)
+        return self._matching(found, root, manifest_hash, leaves)
+
+    @staticmethod
+    def _matching(found: Commitment, root: bytes, manifest_hash: bytes, leaves: int) -> Commitment:
+        if (found.root, found.manifest, found.leaves) != (hex32(root), hex32(manifest_hash), leaves):
+            raise RPCError(
+                f"issue {found.issue} was committed with another root, manifest or size than the local files"
+            )
+        return found
+
+    def _finish(self, issue: int, tx_hash: str, timeout_s: float) -> Commitment:
+        """Wait for a commit transaction and read the commitment from its receipt's event."""
         receipt = self._receipt(tx_hash, timeout_s)
         if int(receipt["status"], 16) != 1:
             raise RPCError(f"commit transaction {tx_hash} reverted")
-        block = int(receipt["blockNumber"], 16)
-        commitment = Commitment(
-            issue,
-            hex32(root),
-            hex32(manifest_hash),
-            leaves,
-            tx_hash,
-            block,
-            self.block_timestamp(block),
-            self.chain_id,
-            self.address,
-        )
+        topics = ["0x" + COMMITTED.hex(), "0x" + issue.to_bytes(32, "big").hex()]
+        events = [
+            e
+            for e in receipt.get("logs", [])
+            if e["address"].lower() == self.address.lower() and [t.lower() for t in e["topics"]] == topics
+        ]
+        if not events:
+            raise RPCError(f"{tx_hash} committed nothing for issue {issue}")
+        commitment = self._commitment(issue, events[0], tx_hash)
         if not commitment.in_window:
             raise RPCError(
                 f"commit {tx_hash} was mined outside the issue's window"
@@ -261,6 +309,6 @@ class Ledger:
             receipt: dict[str, Any] | None = self._rpc.call("eth_getTransactionReceipt", tx_hash)
             if receipt is not None:
                 return receipt
-            if time.monotonic() > deadline:
+            if time.monotonic() >= deadline:
                 raise RPCError(f"no receipt for {tx_hash} after {timeout_s:.0f}s")
             time.sleep(0.5)
