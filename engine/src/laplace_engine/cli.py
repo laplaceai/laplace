@@ -14,13 +14,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 from eth_hash.auto import keccak
 
 from laplace_engine import candles, chain, files, issue, publish, release, settle, verify
 from laplace_research.data.candles import fetch_hourly
-from laplace_research.evolve.feed import product
+from laplace_research.evolve.feed import HORIZONS, product
 
 log = logging.getLogger("laplace_engine")
 
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     board = sub.add_parser("scoreboard", help="mean log scores and gains over the baselines, from settled questions")
     board.add_argument("--data", type=Path, required=True)
+    board.add_argument("--horizon", type=int, choices=HORIZONS, help="gains at one horizon instead of overall")
 
     status = sub.add_parser("status", help="recent issues: sealed, committed, published")
     status.add_argument("--data", type=Path, required=True)
@@ -314,14 +316,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_scoreboard(args: argparse.Namespace) -> int:
     board = settle.scoreboard(settle.load_settlements(args.data / "issues"))
-    print(f"{board['settled_issues']} settled issues ({board['first_issue']} to {board['last_issue']})")
-    print(
-        f"{'forecaster':12s} {'questions':>9s} {'log score':>9s}  " + "  ".join(f"vs {b:>6s}" for b in settle.BASELINES)
-    )
-    for name, entry in sorted(board["forecasters"].items(), key=lambda kv: -kv[1]["mean_log_score"]):
-        gains = "  ".join(f"{entry['vs'][b]['mean']:+9.4f}" if b in entry["vs"] else " " * 9 for b in settle.BASELINES)
-        print(f"{name:12s} {entry['questions']:9d} {entry['mean_log_score']:9.4f}  {gains}")
+    scope = f"at {args.horizon}h" if args.horizon else "over issues settled at every horizon"
+    print(f"{board['settled_issues']} settled issues ({board['first_issue']} to {board['last_issue']}); gains {scope}")
+    columns = "  ".join(f"vs {b:>6s}" for b in settle.BASELINES)
+    print(f"{'forecaster':12s} {'release':7s} {'questions':>9s} {'log score':>9s}  {columns}")
+    for entry in sorted(board["forecasters"].values(), key=lambda e: -e["mean_log_score"]):
+        gains = "  ".join(_gain(entry["vs"].get(b), args.horizon) for b in settle.BASELINES)
+        print(
+            f"{entry['name']:12s} {entry['release']:7s} {entry['questions']:9d} {entry['mean_log_score']:9.4f}  {gains}"
+        )
     return 0
+
+
+def _gain(comparison: dict[str, Any] | None, horizon: int | None) -> str:
+    """A gain for the table: '-' where there is nothing to compare yet."""
+    if comparison is not None and horizon is not None:
+        comparison = comparison["by_horizon"].get(str(horizon))
+    if comparison is None or comparison["mean"] is None:
+        return f"{'-':>9s}"
+    return f"{comparison['mean']:+9.4f}"
 
 
 def cmd_status(args: argparse.Namespace) -> int:

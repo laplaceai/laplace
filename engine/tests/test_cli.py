@@ -8,7 +8,7 @@ import pytest
 from eth_account import Account
 from eth_hash.auto import keccak
 
-from laplace_engine import candles, chain, cli, publish, release
+from laplace_engine import candles, chain, cli, publish, release, settle
 from laplace_engine.baselines import NAIVE
 from laplace_engine.chain import RPC
 from laplace_engine.release import Pool, Program, Release
@@ -139,3 +139,20 @@ def test_only_one_run_at_a_time(tmp_path: Path) -> None:
             assert not second
     with cli.run_lock(tmp_path / ".lock") as again:
         assert again
+
+
+def test_scoreboard_reads_before_any_issue_has_settled_at_every_horizon(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    issues = tmp_path / "data" / "issues" / "100"
+    issues.mkdir(parents=True)
+    scores = {"demon": {"BTC": -1.0}, "naive": {"BTC": -1.5}}
+    s = settle.Settlement(100, 1, "issue 101", {"BTC": 1.0}, {"BTC": 1.0}, {"BTC": 5}, scores, "r1", {})
+    (issues / settle.settlement_name(1)).write_bytes(s.to_json())
+    data = ["--data", str(tmp_path / "data")]
+    assert cli.main(["scoreboard", *data]) == 0
+    demon = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("demon"))
+    assert demon.split()[-3:] == ["-", "-", "-"]
+    assert cli.main(["scoreboard", *data, "--horizon", "1"]) == 0
+    demon = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("demon"))
+    assert demon.split()[-3] == "+0.5000"
