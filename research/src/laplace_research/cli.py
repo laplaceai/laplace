@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from laplace_research import __version__
 
-RUNS = Path(__file__).resolve().parents[2] / "runs"
+ROOT = Path(__file__).resolve().parents[2]
+RUNS = ROOT / "runs"
+CACHE = ROOT / ".cache"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +25,13 @@ def build_parser() -> argparse.ArgumentParser:
     majors.add_argument("--step-hours", type=int, default=6)
     majors.add_argument("--concurrency", type=int, default=16)
     majors.add_argument("--agents", help="comma-separated model/directive ids (default: all)")
+
+    evolve = sub.add_parser("evolve", help="evolutionary search over forecasting programs (PoC 2)")
+    evolve.add_argument("action", choices=["init", "run", "report"])
+    evolve.add_argument("--run-id", required=True)
+    evolve.add_argument("--generations", type=int, default=4)
+    evolve.add_argument("--children", type=int, default=2, help="children per island per generation")
+    evolve.add_argument("--workers", type=int, default=8, help="evaluation processes")
     return parser
 
 
@@ -48,4 +58,20 @@ def main(argv: list[str] | None = None) -> int:
                 agents=agents,
             )
         print(report.render(report.report(run_dir)))
+    if args.command == "evolve":
+        # Evaluation runs many single-threaded workers; keep numerical libraries from spawning thread pools in each.
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ.setdefault(var, "1")
+        import asyncio
+
+        from laplace_research.evolve import report as evolve_report
+        from laplace_research.evolve.run import Run
+
+        run_dir = RUNS / f"evolve-{args.run_id}"
+        if args.action == "init":
+            Run.init(run_dir, CACHE / "candles")
+        elif args.action == "run":
+            asyncio.run(Run(run_dir).evolve(args.generations, args.children, args.workers))
+        else:
+            print(evolve_report.render(evolve_report.report(run_dir, workers=args.workers)))
     return 0
