@@ -18,8 +18,8 @@ EDGES_PCT: dict[int, tuple[float, ...]] = {
     24: (1.5, 3.5, 7.0, 14.0),
 }
 N_BINS = 2 * 4 + 2
-# Forecasts are mixed with a uniform distribution at this weight before scoring, which bounds the loss of any bin at
-# log(N_BINS / FLOOR) and treats every forecaster, baselines included, identically.
+# A raw forecast becomes final by mixing it with the uniform distribution at this weight, which bounds the loss of any
+# bin at log(N_BINS / FLOOR) and treats every forecaster, baselines included, identically.
 FLOOR = 1e-3
 
 FloatArray = npt.NDArray[np.float64]
@@ -41,8 +41,14 @@ def bin_index(log_returns: FloatArray, horizon: int) -> IntArray:
     return np.searchsorted(edges(horizon), log_returns, side="right").astype(np.int64)
 
 
-def floor(probs: FloatArray) -> FloatArray:
-    """Normalize along the last axis and mix with the uniform distribution at weight ``FLOOR``."""
-    p = probs / probs.sum(axis=-1, keepdims=True)
+def finalize(raw: FloatArray) -> FloatArray:
+    """Turn raw forecasts into final forecasts: normalize along the last axis, then mix with the uniform distribution
+    at weight ``FLOOR``.
+
+    This is applied exactly once, where a raw forecast enters the system. The final forecast is what gets scored,
+    pooled and published. A mixture of final forecasts is already final and must not be finalized again: that would
+    smooth it twice and flatter its score.
+    """
+    p = raw / raw.sum(axis=-1, keepdims=True)
     out: FloatArray = (1 - FLOOR) * p + FLOOR / N_BINS
     return out
