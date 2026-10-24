@@ -11,6 +11,7 @@ import os
 import resource
 import signal
 import time
+import warnings
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -98,6 +99,9 @@ def _init_worker(panel_path: str) -> None:
     resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
     signal.signal(signal.SIGALRM, _on_alarm)
     np.seterr(all="ignore")
+    # Warnings raised inside numpy while running a program would otherwise go through the warnings machinery from the
+    # program's restricted frame; the program's output is validated anyway.
+    warnings.simplefilter("ignore")
     _PANEL = Panel.load(Path(panel_path))
 
 
