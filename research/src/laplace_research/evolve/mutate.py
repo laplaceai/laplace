@@ -29,14 +29,14 @@ MUTATORS = {
         Mutator(
             "glm-5.3-flash",
             "@cf/zai-org/glm-5.3-flash",
-            {"reasoning_effort": "low", "max_completion_tokens": 8000},
+            {"reasoning_effort": "low", "max_completion_tokens": 16000},
             0.15,
             0.5,
         ),
         Mutator(
             "deepseek-v4.1-flash",
             "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
-            {"reasoning_effort": "low", "max_completion_tokens": 8000},
+            {"reasoning_effort": "low", "max_completion_tokens": 16000},
             0.30,
             1.20,
         ),
