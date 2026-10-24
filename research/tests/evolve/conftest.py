@@ -29,3 +29,14 @@ def panel() -> Panel:
         close=close,
         volume=rng.uniform(10, 20, (n, HOURS)),
     )
+
+
+@pytest.fixture
+def history(panel: Panel, tmp_path):  # type: ignore[no-untyped-def]
+    """The synthetic panel saved with its past-only history files; returns the panel path."""
+    from laplace_research.evolve.history import write_history
+
+    path = tmp_path / "panel.npz"
+    panel.save(path)
+    write_history(panel, path)
+    return path

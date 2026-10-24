@@ -1,8 +1,10 @@
 """Run programs over sampled forecast times and score them with proper scoring rules.
 
-A program is evaluated in a worker process with a CPU-time alarm and an address-space limit. It is called once per
-(asset, horizon, time); any exception, timeout or malformed output rejects the whole program with a message that the
-next mutation prompt can show to the model.
+Each evaluation runs in a fresh, spawned worker process (nothing inherited from the parent, which holds the full
+panel) with a CPU-time alarm and an address-space limit. The worker reads candles forward through
+``history.HistoryReader``, so when a program forecasts at hour ``t`` its process has never loaded a candle after ``t``.
+The program is called once per (asset, horizon, time); any exception, timeout or malformed output rejects the whole
+program with a message that the next mutation prompt can show to the model.
 """
 
 from __future__ import annotations
@@ -23,8 +25,9 @@ from typing import Any
 
 import numpy as np
 
-from laplace_research.evolve.context import LOOKBACK, build_context
-from laplace_research.evolve.feed import HORIZONS, N_BINS, FloatArray, IntArray, bin_index, floor
+from laplace_research.evolve.context import LOOKBACK
+from laplace_research.evolve.feed import HORIZONS, N_BINS, FloatArray, IntArray, bin_index
+from laplace_research.evolve.history import HistoryReader, ensure_history
 from laplace_research.evolve.panel import Panel
 from laplace_research.evolve.sandbox import ProgramRejected, load
 
@@ -35,13 +38,19 @@ MEMORY_LIMIT_BYTES = 3 * 1024**3
 @dataclass(frozen=True)
 class Split:
     name: str
-    times: IntArray  # panel time indices at whose close forecasts are made
+    times: IntArray  # panel hour indices at whose close forecasts are made
 
 
 def sample_times(panel: Panel, start: datetime, end: datetime, step_hours: int) -> IntArray:
-    """Every ``step_hours``-th hour in ``[start, end)`` with a full lookback and all horizons settled."""
+    """Every ``step_hours``-th hour from ``start`` with a full lookback, keeping only forecasts whose labels at every
+    horizon settle before ``end``.
+
+    A forecast at hour ``t`` settles at the close of hour ``t + h``. Requiring ``t + MAX_HORIZON < index(end)`` means
+    every label of a window is known strictly before the next window's first forecast, so nothing a window is
+    fitted or selected on comes from the window after it.
+    """
     lo = max(panel.index_at_or_after(start), LOOKBACK - 1)
-    hi = min(panel.index_at_or_after(end), len(panel.ts) - 1 - MAX_HORIZON)
+    hi = min(panel.index_at_or_after(end), len(panel.ts)) - MAX_HORIZON
     return np.arange(lo, hi, step_hours, dtype=np.int64)
 
 
@@ -54,23 +63,15 @@ def realized_bins(panel: Panel, times: IntArray) -> IntArray:
     return out
 
 
-def realized_log_returns(panel: Panel, times: IntArray) -> FloatArray:
-    out = np.empty((len(panel.assets), len(HORIZONS), len(times)))
-    for j, h in enumerate(HORIZONS):
-        out[:, j, :] = np.log(panel.close[:, times + h] / panel.close[:, times])
+def log_scores(final: FloatArray, realized: IntArray) -> FloatArray:
+    """Log probability that final forecasts gave the realized bin: ``[asset, horizon, sample]``."""
+    out: FloatArray = np.log(np.take_along_axis(final, realized[..., None], axis=-1)[..., 0])
     return out
 
 
-def log_scores(probs: FloatArray, realized: IntArray) -> FloatArray:
-    """Log probability of the realized bin, after flooring: ``[asset, horizon, sample]``."""
-    p = floor(probs)
-    out: FloatArray = np.log(np.take_along_axis(p, realized[..., None], axis=-1)[..., 0])
-    return out
-
-
-def ranked_probability_scores(probs: FloatArray, realized: IntArray) -> FloatArray:
-    """Ranked probability score (lower is better), which rewards putting mass near the realized bin."""
-    cdf = np.cumsum(floor(probs), axis=-1)
+def ranked_probability_scores(final: FloatArray, realized: IntArray) -> FloatArray:
+    """Ranked probability score of final forecasts (lower is better), which rewards mass near the realized bin."""
+    cdf = np.cumsum(final, axis=-1)
     observed = (np.arange(N_BINS) >= realized[..., None]).astype(np.float64)
     out: FloatArray = np.sum((cdf - observed) ** 2, axis=-1) / (N_BINS - 1)
     return out
@@ -82,7 +83,7 @@ def day_groups(panel: Panel, times: IntArray) -> list[str]:
 
 # ---- worker side -------------------------------------------------------------------------------------------------
 
-_PANEL: Panel | None = None
+_HISTORY: tuple[Path, Path] | None = None
 
 
 class _Timeout(Exception):
@@ -93,8 +94,8 @@ def _on_alarm(signum: int, frame: Any) -> None:
     raise _Timeout
 
 
-def _init_worker(panel_path: str) -> None:
-    global _PANEL
+def _init_worker(data_path: str, meta_path: str) -> None:
+    global _HISTORY
     os.environ["OMP_NUM_THREADS"] = "1"
     resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
     signal.signal(signal.SIGALRM, _on_alarm)
@@ -102,30 +103,34 @@ def _init_worker(panel_path: str) -> None:
     # Warnings raised inside numpy while running a program would otherwise go through the warnings machinery from the
     # program's restricted frame; the program's output is validated anyway.
     warnings.simplefilter("ignore")
-    _PANEL = Panel.load(Path(panel_path))
+    _HISTORY = (Path(data_path), Path(meta_path))
 
 
 @dataclass(frozen=True)
 class Outcome:
-    probs: FloatArray | None  # [asset, horizon, sample, bin], raw (not floored)
+    probs: FloatArray | None  # [asset, horizon, sample, bin], raw (finalize before scoring)
     error: str | None
     seconds: float
 
 
 def _run(source: str, times: IntArray, time_limit_s: int) -> Outcome:
-    assert _PANEL is not None
+    assert _HISTORY is not None
+    if np.any(np.diff(times) < 0):
+        raise ValueError("forecast times must be non-decreasing")
     started = time.perf_counter()
     try:
         fn = load(source)
     except ProgramRejected as exc:
         return Outcome(None, f"rejected: {exc}", 0.0)
-    out = np.empty((len(_PANEL.assets), len(HORIZONS), len(times), N_BINS))
+    reader = HistoryReader(*_HISTORY)
+    out = np.empty((len(reader.assets), len(HORIZONS), len(times), N_BINS))
     signal.alarm(time_limit_s)
     try:
         for n, t in enumerate(times):
-            for a in range(len(_PANEL.assets)):
+            reader.advance_to(int(t))
+            for a in range(len(reader.assets)):
                 for j, h in enumerate(HORIZONS):
-                    raw = np.asarray(fn(build_context(_PANEL, a, int(t), h)), dtype=np.float64)
+                    raw = np.asarray(fn(reader.context(a, int(t), h)), dtype=np.float64)
                     if raw.shape != (N_BINS,) or not np.all(np.isfinite(raw)) or np.any(raw < 0) or raw.sum() <= 0:
                         return Outcome(None, f"bad output {np.array2string(raw, precision=3)[:200]}", 0.0)
                     out[a, j, n] = raw
@@ -141,19 +146,21 @@ def _run(source: str, times: IntArray, time_limit_s: int) -> Outcome:
 
 
 class Evaluator:
-    """A pool of worker processes that each hold the panel."""
+    """A pool of spawned worker processes; each evaluation gets a fresh process that reads history forward."""
 
     def __init__(self, panel_path: Path, workers: int) -> None:
-        self._panel_path = str(panel_path)
+        data_path, meta_path = ensure_history(panel_path)
+        self._history: tuple[str, str] = (str(data_path), str(meta_path))
         self._workers = workers
         self._pool = self._new_pool()
 
     def _new_pool(self) -> ProcessPoolExecutor:
         return ProcessPoolExecutor(
             max_workers=self._workers,
-            mp_context=get_context("fork"),
+            mp_context=get_context("spawn"),
             initializer=_init_worker,
-            initargs=(self._panel_path,),
+            initargs=self._history,
+            max_tasks_per_child=1,
         )
 
     def submit(self, source: str, times: IntArray, time_limit_s: int) -> Any:
