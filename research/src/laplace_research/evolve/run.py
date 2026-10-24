@@ -24,6 +24,7 @@ from laplace_research.evolve.evaluate import (
     realized_bins,
     sample_times,
 )
+from laplace_research.evolve.feed import finalize
 from laplace_research.evolve.islands import ISLANDS, SEED_PROGRAM
 from laplace_research.evolve.mutate import MUTATORS, NoProgram, Scored, build_prompt, propose
 from laplace_research.evolve.panel import Panel
@@ -91,7 +92,7 @@ class Run:
         self.db = Database(run_dir / "programs.sqlite")
         self.search = self.config.split(self.panel, "search")
         self.search_realized = realized_bins(self.panel, self.search.times)
-        self.search_naive = log_scores(naive(self.panel.close).probs(self.search.times), self.search_realized)
+        self.search_naive = log_scores(finalize(naive(self.panel.close).probs(self.search.times)), self.search_realized)
 
     @staticmethod
     def init(run_dir: Path, cache_dir: Path) -> Run:
@@ -124,7 +125,7 @@ class Run:
         outcome = evaluator.run(code, self.search.times, TIME_LIMIT_S)
         if outcome.probs is None:
             return Score(error=outcome.error, eval_seconds=outcome.seconds)
-        log_p = log_scores(outcome.probs, self.search_realized)
+        log_p = log_scores(finalize(outcome.probs), self.search_realized)
         return Score(
             gain=mean_gain(log_p, self.search_naive),
             breakdown=breakdown(log_p, self.search_naive, self.panel.assets),
@@ -178,7 +179,10 @@ class Run:
             proposal = await propose(ai, mutator, prompt)
         except AuthError:
             raise
-        except (InferenceError, NoProgram, KeyError) as exc:
+        except NoProgram as exc:  # answered but unusable: billed, so its cost is recorded
+            record(code="", error=f"mutation: {exc}"[:400], cost_usd=exc.cost_usd)
+            return None
+        except (InferenceError, KeyError) as exc:  # no usable answer; any billing is unknown here
             record(code="", error=f"mutation: {exc}"[:400])
             return None
         if self.db.has_code(island_id, proposal.code):

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
-from laplace_research.inference import WorkersAI
+
+class ModelRunner(Protocol):
+    async def run(self, model: str, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -127,7 +129,11 @@ class Proposal:
 
 
 class NoProgram(ValueError):
-    pass
+    """The model answered but gave no usable program. The call was still billed, so the cost travels with the error."""
+
+    def __init__(self, message: str, cost_usd: float = 0.0) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 def parse_reply(content: str) -> tuple[str, str, str]:
@@ -143,15 +149,19 @@ def parse_reply(content: str) -> tuple[str, str, str]:
     )
 
 
-async def propose(ai: WorkersAI, mutator: Mutator, prompt: str) -> Proposal:
+async def propose(ai: ModelRunner, mutator: Mutator, prompt: str) -> Proposal:
     result = await ai.run(
         mutator.model,
         {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], **mutator.options},
     )
     usage = result.get("usage", {})
+    cost = mutator.cost(usage)
     choice = result["choices"][0]
     content = choice["message"].get("content") or ""
     if not content and choice.get("finish_reason") == "length":
-        raise NoProgram("token budget spent on reasoning")
-    code, title, why = parse_reply(content)
-    return Proposal(code, title, why, mutator.cost(usage), usage)
+        raise NoProgram("token budget spent on reasoning", cost)
+    try:
+        code, title, why = parse_reply(content)
+    except NoProgram as exc:
+        raise NoProgram(str(exc), cost) from None
+    return Proposal(code, title, why, cost, usage)
