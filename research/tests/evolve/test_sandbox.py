@@ -33,3 +33,33 @@ def test_restricted_namespace_blocks_dynamic_imports() -> None:
     # A name check alone would miss an import smuggled through a string; the restricted __import__ refuses it.
     fn = load("def forecast(ctx):\n    import math\n    return [math.pi] * 10\n")
     assert fn(None)[0] == pytest.approx(3.14159, rel=1e-5)
+
+
+ESCAPES = {
+    "backing array": "def forecast(ctx):\n    return [float(ctx.close.base[0, -1])] * 10\n",
+    "module alias": (
+        "import numpy as np\ndef forecast(ctx):\n    x = np\n    return x.lib.stride_tricks.as_strided(ctx.close)\n"
+    ),
+    "module in a list": "import numpy as np\ndef forecast(ctx):\n    return [np][0].lib\n",
+    "module default argument": "import math\ndef forecast(ctx, m=math):\n    return [1] * 10\n",
+    "array file write": "def forecast(ctx):\n    ctx.close.tofile('/tmp/x')\n    return [1] * 10\n",
+    "array pickle": "def forecast(ctx):\n    ctx.close.dump('/tmp/x')\n    return [1] * 10\n",
+    "flag change": "def forecast(ctx):\n    ctx.close.setflags(write=True)\n    return [1] * 10\n",
+    "raw pointer": "def forecast(ctx):\n    return ctx.close.ctypes\n",
+    "attribute store": "def forecast(ctx):\n    ctx.horizon = 1\n    return [1] * 10\n",
+    "dunder name": "def forecast(ctx):\n    return __builtins__\n",
+}
+
+
+@pytest.mark.parametrize("source", ESCAPES.values(), ids=ESCAPES.keys())
+def test_rejects_escapes(source: str) -> None:
+    with pytest.raises(ProgramRejected):
+        check(source)
+
+
+def test_allows_ordinary_numpy_and_the_helper_library() -> None:
+    check(
+        "import numpy as np\nimport math\n\n\ndef _sd(r):\n    return math.sqrt(float(np.mean(r * r)))\n\n\n"
+        "def forecast(ctx):\n    r = ctx.lib.log_returns(ctx.close)\n"
+        "    return ctx.lib.student_t_probs(_sd(r[-168:]) * math.sqrt(ctx.horizon), 5.0, ctx.edges)\n"
+    )
