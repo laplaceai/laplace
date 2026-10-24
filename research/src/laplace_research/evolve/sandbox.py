@@ -1,9 +1,15 @@
 """Static checks and a restricted namespace for language-model-written forecasting programs.
 
-This is defence in depth for research runs on our own machines, where every program comes from our own mutation
-calls: an AST allow-list (imports limited to ``math`` and ``numpy``, no private attributes, no I/O, no dynamic code),
-restricted builtins, and execution in a separate, resource-limited process (see ``evaluate``). Production runs
-execute programs in isolated containers without network access.
+The guarantee that a program cannot see the future is structural (see ``history``): its process holds no future
+candle. These checks are defence in depth against everything else a program might try. Every program comes from our
+own mutation calls in research runs; production runs execute programs in isolated containers without network access.
+
+- Imports are limited to ``math`` and ``numpy``, and a module may only be used as ``module.attribute``, never
+  assigned, passed or returned (an alias would slip past the attribute checks below).
+- Attribute names that reach files, raw memory, pickling or randomness are refused on any object.
+- No private or dunder names, no attribute assignment, no dynamic code, classes or global state.
+- Builtins are restricted; ``__import__`` returns the allowed modules and lets numpy's own internal submodule imports
+  through.
 """
 
 from __future__ import annotations
@@ -26,13 +32,16 @@ FORBIDDEN_NAMES = frozenset(
         "help", "input", "locals", "memoryview", "open", "print", "quit", "setattr", "super", "type", "vars",
     }
 )  # fmt: skip
-# numpy entry points that read or write files, load code, reach outside the process, or are non-deterministic.
-FORBIDDEN_NUMPY_ATTRIBUTES = frozenset(
+# Refused on any object: file access, raw memory and buffers, pickling, flag changes and randomness.
+FORBIDDEN_ATTRIBUTES = frozenset(
     {
-        "ctypeslib", "DataSource", "distutils", "f2py", "fromfile", "fromregex", "genfromtxt", "lib", "load",
-        "loadtxt", "memmap", "random", "save", "savetxt", "savez", "savez_compressed", "testing", "tofile",
+        "base", "ctypes", "ctypeslib", "DataSource", "distutils", "dump", "dumps", "f2py", "fromfile", "fromregex",
+        "genfromtxt", "load", "loads", "loadtxt", "memmap", "random", "save", "savetxt", "savez", "savez_compressed",
+        "setflags", "testing", "tofile",
     }
 )  # fmt: skip
+# Refused when reached from a module (``numpy.lib`` holds stride tricks and file I/O); ``ctx.lib`` stays allowed.
+FORBIDDEN_MODULE_ATTRIBUTES = frozenset({"lib"})
 SAFE_BUILTINS = {
     name: getattr(builtins, name)
     for name in (
@@ -48,12 +57,16 @@ class ProgramRejected(ValueError):
     """The source failed static checks or does not define ``forecast(ctx)``."""
 
 
-def _numpy_aliases(tree: ast.Module) -> set[str]:
-    aliases = {"numpy"}
+def _module_aliases(tree: ast.Module) -> set[str]:
+    aliases = set(ALLOWED_MODULES)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            aliases |= {a.asname or a.name for a in node.names if a.name == "numpy"}
+            aliases |= {(a.asname or a.name).split(".")[0] for a in node.names}
     return aliases
+
+
+def _parents(tree: ast.Module) -> dict[ast.AST, ast.AST]:
+    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 
 
 def check(source: str) -> ast.Module:
@@ -64,7 +77,8 @@ def check(source: str) -> ast.Module:
         tree = ast.parse(source)
     except SyntaxError as exc:
         raise ProgramRejected(f"syntax error: {exc.msg} (line {exc.lineno})") from None
-    numpy_names = _numpy_aliases(tree)
+    modules = _module_aliases(tree)
+    parents = _parents(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             bad = [a.name for a in node.names if a.name not in ALLOWED_MODULES]
@@ -73,15 +87,23 @@ def check(source: str) -> ast.Module:
         elif isinstance(node, ast.ImportFrom):
             if node.module not in ALLOWED_MODULES or node.level:
                 raise ProgramRejected(f"import from {node.module} is not allowed (only math and numpy)")
-            if node.module == "numpy" and any(a.name in FORBIDDEN_NUMPY_ATTRIBUTES for a in node.names):
+            if any(a.name in FORBIDDEN_ATTRIBUTES | FORBIDDEN_MODULE_ATTRIBUTES for a in node.names):
                 raise ProgramRejected("that numpy import is not allowed")
-        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            raise ProgramRejected(f"use of {node.id} is not allowed")
+        elif isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_NAMES or (node.id.startswith("__") and node.id.endswith("__")):
+                raise ProgramRejected(f"use of {node.id} is not allowed")
+            parent = parents.get(node)
+            if node.id in modules and not (isinstance(parent, ast.Attribute) and parent.value is node):
+                raise ProgramRejected(f"a module may only be used as {node.id}.<attribute>")
         elif isinstance(node, ast.Attribute):
             if node.attr.startswith("_"):
                 raise ProgramRejected(f"access to private attribute {node.attr} is not allowed")
-            if node.attr in FORBIDDEN_NUMPY_ATTRIBUTES and _rooted_in(node.value, numpy_names):
-                raise ProgramRejected(f"numpy.{node.attr} is not allowed")
+            if node.attr in FORBIDDEN_ATTRIBUTES:
+                raise ProgramRejected(f"attribute {node.attr} is not allowed")
+            if node.attr in FORBIDDEN_MODULE_ATTRIBUTES and _rooted_in(node.value, modules):
+                raise ProgramRejected(f"module attribute {node.attr} is not allowed")
+            if not isinstance(node.ctx, ast.Load):
+                raise ProgramRejected("assigning or deleting attributes is not allowed")
         elif isinstance(node, ast.ClassDef | ast.Global | ast.Nonlocal | ast.AsyncFunctionDef | ast.Await):
             raise ProgramRejected(f"{type(node).__name__} is not allowed")
     if not any(isinstance(n, ast.FunctionDef) and n.name == "forecast" for n in tree.body):
@@ -98,9 +120,14 @@ def _rooted_in(node: ast.expr, names: set[str]) -> bool:
 def _restricted_import(
     name: str, globals_: Any = None, locals_: Any = None, fromlist: Any = (), level: int = 0
 ) -> ModuleType:
-    if level or name not in ALLOWED_MODULES:
-        raise ImportError(f"import of {name} is not allowed")
-    return ALLOWED_MODULES[name]
+    if level == 0 and name in ALLOWED_MODULES:
+        return ALLOWED_MODULES[name]
+    # numpy's C code imports some of its own submodules lazily (e.g. numpy._core._methods on the first ``ndarray.clip``
+    # in a process), and such imports go through the builtins of whichever Python frame is running: the program's.
+    # Program source can never ask for these: the static check refuses every import except ``math`` and ``numpy``.
+    if level == 0 and name.startswith("numpy."):
+        return builtins.__import__(name, globals_, locals_, fromlist, level)
+    raise ImportError(f"import of {name} is not allowed")
 
 
 def load(source: str) -> Callable[[Any], Any]:

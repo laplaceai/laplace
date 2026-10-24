@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from laplace_research.evolve import lib
-from laplace_research.evolve.feed import FLOOR, HORIZONS, N_BINS, bin_index, edges, floor
+from laplace_research.evolve.feed import FLOOR, HORIZONS, N_BINS, bin_index, edges, finalize
 
 
 @pytest.mark.parametrize("h", HORIZONS)
@@ -18,8 +18,8 @@ def test_bin_index_puts_edges_in_the_upper_bin_and_tails_at_the_ends() -> None:
     assert list(bin_index(np.array([-1.0, e[0], 0.0, -1e-9, 1.0]), 24)) == [0, 1, 5, 4, 9]
 
 
-def test_floor_normalizes_and_bounds_every_bin() -> None:
-    p = floor(np.array([[5.0] + [0.0] * (N_BINS - 1)]))
+def test_finalize_normalizes_and_bounds_every_bin() -> None:
+    p = finalize(np.array([[5.0] + [0.0] * (N_BINS - 1)]))
     assert p.sum() == pytest.approx(1)
     assert p.min() == pytest.approx(FLOOR / N_BINS)
 

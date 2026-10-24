@@ -41,3 +41,28 @@ def test_database_ranks_programs_and_hides_infrastructure_failures(tmp_path: Pat
     assert db.has_code(island, "a")
     assert not db.has_code(island, "z")
     assert db.last_generation() == 1
+
+
+class _FakeRunner:
+    def __init__(self, content: str, finish_reason: str = "stop") -> None:
+        self._result = {
+            "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 5_000, "completion_tokens": 8_000},
+        }
+
+    async def run(self, model: str, payload: dict[str, object]) -> dict[str, object]:
+        return self._result
+
+
+@pytest.mark.parametrize(
+    ("content", "finish_reason"), [("no code in this reply", "stop"), ("", "length")], ids=["no code", "out of tokens"]
+)
+def test_unusable_replies_still_carry_their_cost(content: str, finish_reason: str) -> None:
+    import asyncio
+
+    from laplace_research.evolve.mutate import propose
+
+    mutator = MUTATORS["deepseek-v4.1-flash"]
+    with pytest.raises(NoProgram) as exc:
+        asyncio.run(propose(_FakeRunner(content, finish_reason), mutator, "prompt"))
+    assert exc.value.cost_usd == pytest.approx(mutator.cost({"prompt_tokens": 5_000, "completion_tokens": 8_000}))

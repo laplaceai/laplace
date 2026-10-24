@@ -1,10 +1,12 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from laplace_research.evolve import baselines as b
-from laplace_research.evolve.context import build_context
 from laplace_research.evolve.evaluate import realized_bins, sample_times
 from laplace_research.evolve.feed import HORIZONS, N_BINS
+from laplace_research.evolve.history import HistoryReader, history_paths
 from laplace_research.evolve.islands import SEED_PROGRAM
 from laplace_research.evolve.panel import Panel, utc
 from laplace_research.evolve.sandbox import load
@@ -26,13 +28,15 @@ def test_garch_variance_matches_the_recursion() -> None:
         assert v[t] == pytest.approx(prev)
 
 
-def test_seed_program_reproduces_the_naive_baseline(panel: Panel) -> None:
+def test_seed_program_reproduces_the_naive_baseline(panel: Panel, history: Path) -> None:
     fn = load(SEED_PROGRAM)
     t = 900
     expected = b.naive(panel.close).probs(np.array([t]))
+    reader = HistoryReader(*history_paths(history))
+    reader.advance_to(t)
     for a in range(len(panel.assets)):
         for j, h in enumerate(HORIZONS):
-            assert np.allclose(fn(build_context(panel, a, t, h)), expected[a, j, 0])
+            assert np.allclose(fn(reader.context(a, t, h)), expected[a, j, 0])
 
 
 def test_ladder_fits_and_returns_distributions(panel: Panel) -> None:

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy import optimize, signal, special
 
-from laplace_research.evolve.feed import HORIZONS, N_BINS, FloatArray, IntArray, edges, floor
+from laplace_research.evolve.feed import HORIZONS, N_BINS, FloatArray, IntArray, edges, finalize
 
 NU_GRID = (2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 20.0, 50.0)
 LAMBDA_GRID = (0.9, 0.95, 0.97, 0.98, 0.99, 0.995, 0.998)
@@ -63,7 +63,7 @@ def laplace_bins(sd: FloatArray, horizon: int) -> FloatArray:
 
 
 def _mean_log_score(probs: FloatArray, realized: IntArray) -> float:
-    p = floor(probs)
+    p = finalize(probs)
     return float(np.mean(np.log(np.take_along_axis(p, realized[..., None], axis=-1)[..., 0])))
 
 
@@ -73,7 +73,8 @@ def _best_nu(sd: FloatArray, realized: IntArray, horizon: int) -> float:
 
 @dataclass
 class Baseline:
-    """A fitted baseline: ``sd(times)`` gives ``[asset, horizon, sample]`` standard deviations."""
+    """A fitted baseline: ``sd(times)`` gives ``[asset, horizon, sample]`` standard deviations; ``probs`` returns raw
+    bin probabilities (finalize them once before scoring)."""
 
     name: str
     sd: Callable[[IntArray], FloatArray]

@@ -54,3 +54,28 @@ def block_bootstrap(
     rng = random.Random(seed)
     stats = sorted(statistic([i for k in rng.choices(keys, k=len(keys)) for i in by_group[k]]) for _ in range(n))
     return stats[int(0.025 * n)], stats[int(0.975 * n) - 1]
+
+
+def circular_block_indices(n_obs: int, block: int, *, n_boot: int = 2000, seed: int = 0) -> list[list[int]]:
+    """Resampled index sets for a circular block bootstrap of a time series.
+
+    Each resample concatenates blocks of ``block`` consecutive observations, starting at uniform random positions and
+    wrapping around the end, truncated to ``n_obs``. Reusing the same index sets for every comparison keeps their
+    intervals paired. Unlike calendar-day blocks, blocks may straddle midnight, which matters when outcomes overlap
+    (a 24-hour return issued every 3 hours overlaps eight others).
+    """
+    if not 1 <= block <= n_obs:
+        raise ValueError("block length must be between 1 and the number of observations")
+    rng = random.Random(seed)
+    n_blocks = -(-n_obs // block)
+    return [
+        [(start + k) % n_obs for start in (rng.randrange(n_obs) for _ in range(n_blocks)) for k in range(block)][:n_obs]
+        for _ in range(n_boot)
+    ]
+
+
+def interval(values: Sequence[float], indices: Sequence[Sequence[int]], level: float = 0.95) -> tuple[float, float]:
+    """Percentile interval of the mean of ``values`` over bootstrap ``indices``."""
+    means = sorted(sum(values[i] for i in idx) / len(idx) for idx in indices)
+    tail = (1 - level) / 2
+    return means[int(tail * len(means))], means[int((1 - tail) * len(means)) - 1]

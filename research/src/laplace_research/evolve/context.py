@@ -1,4 +1,7 @@
-"""What a forecasting program sees: the past, and nothing else."""
+"""What a forecasting program sees: the past, and nothing else.
+
+Contexts are only ever built by ``history.HistoryReader``, whose buffer holds no candle after the forecast time.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,6 @@ from datetime import UTC, datetime
 
 from laplace_research.evolve.feed import FloatArray, edges
 from laplace_research.evolve.lib import LIB, Lib
-from laplace_research.evolve.panel import Panel
 
 LOOKBACK = 720
 HOUR = 3600
@@ -52,24 +54,13 @@ class Context:
     lib: Lib
 
 
-def build_context(panel: Panel, asset_index: int, t: int, horizon: int) -> Context:
-    if t + 1 < LOOKBACK:
-        raise ValueError("not enough history for a context")
-    window = slice(t + 1 - LOOKBACK, t + 1)
-    closed_at = datetime.fromtimestamp(int(panel.ts[t]) + HOUR, UTC)
-    peers = {
-        name: Candles(
-            panel.open[i, window],
-            panel.high[i, window],
-            panel.low[i, window],
-            panel.close[i, window],
-            panel.volume[i, window],
-        )
-        for i, name in enumerate(panel.assets)
-    }
-    own = peers[panel.assets[asset_index]]
+def make_context(peers: dict[str, Candles], asset: str, horizon: int, candle_open_ts: int) -> Context:
+    """Assemble a context for ``asset`` from per-asset windows ending with the candle that opened at
+    ``candle_open_ts``."""
+    closed_at = datetime.fromtimestamp(candle_open_ts + HOUR, UTC)
+    own = peers[asset]
     return Context(
-        asset=panel.assets[asset_index],
+        asset=asset,
         horizon=horizon,
         edges=EDGES[horizon],
         hour=closed_at.hour,
