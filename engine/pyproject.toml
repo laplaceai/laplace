@@ -5,8 +5,11 @@ description = "The live engine: hourly forecasts, their Merkle commitments on-ch
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "boto3>=1.35",
   "eth-abi>=5.1",
+  "eth-account>=0.13",
   "eth-hash[pycryptodome]>=0.7",
+  "httpx>=0.27",
   "laplace-research",
   "numpy>=2.1",
 ]
@@ -50,7 +53,7 @@ mypy_path = "src"
 packages = ["laplace_engine"]
 
 [[tool.mypy.overrides]]
-module = ["scipy", "scipy.*"]
+module = ["scipy", "scipy.*", "boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
