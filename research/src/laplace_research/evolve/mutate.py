@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 
 class ModelRunner(Protocol):
-    async def run(self, model: str, payload: dict[str, Any]) -> dict[str, Any]: ...
+    async def run(
+        self, model: str, payload: dict[str, Any], metadata: Mapping[str, str | int | float | bool] | None = None
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -149,10 +152,14 @@ def parse_reply(content: str) -> tuple[str, str, str]:
     )
 
 
-async def propose(ai: ModelRunner, mutator: Mutator, prompt: str) -> Proposal:
+async def propose(
+    ai: ModelRunner, mutator: Mutator, prompt: str, metadata: Mapping[str, str | int | float | bool] | None = None
+) -> Proposal:
+    """Ask ``mutator`` for a child program. ``metadata`` tags the request in the gateway's logs."""
     result = await ai.run(
         mutator.model,
         {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], **mutator.options},
+        metadata,
     )
     usage = result.get("usage", {})
     cost = mutator.cost(usage)
