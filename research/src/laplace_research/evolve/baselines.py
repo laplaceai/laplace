@@ -8,7 +8,8 @@
   variance, fitted by least squares per asset and horizon, with Student-t tails.
 
 Every parameter is fitted on the search window only. Tail shapes (``nu``) are chosen per horizon by the same binned log
-score the programs are judged by.
+score the programs are judged by. Each fitted baseline exposes its parameters (``params``, JSON-ready), so it can be
+frozen and rerun elsewhere.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from scipy import optimize, signal, special
@@ -74,11 +76,13 @@ def _best_nu(sd: FloatArray, realized: IntArray, horizon: int) -> float:
 @dataclass
 class Baseline:
     """A fitted baseline: ``sd(times)`` gives ``[asset, horizon, sample]`` standard deviations; ``probs`` returns raw
-    bin probabilities (finalize them once before scoring)."""
+    bin probabilities (finalize them once before scoring). ``params`` holds every other fitted value, per asset in panel
+    order where it differs by asset."""
 
     name: str
     sd: Callable[[IntArray], FloatArray]
     nu: dict[int, float] = field(default_factory=dict)  # empty for the Laplace baseline
+    params: dict[str, Any] = field(default_factory=dict)
 
     def probs(self, times: IntArray) -> FloatArray:
         sd = self.sd(times)
@@ -125,7 +129,7 @@ def ewma(close: FloatArray, realized_fit: IntArray, fit_times: IntArray) -> Base
             best = (score, lam, nus)
     assert best is not None
     _, lam, nus = best
-    return Baseline(f"ewma(lambda={lam})", make_sd(variance(lam)), nus)
+    return Baseline(f"ewma(lambda={lam})", make_sd(variance(lam)), nus, {"lambda": lam})
 
 
 def _garch_variance(r: FloatArray, omega: float, alpha: float, beta: float) -> FloatArray:
@@ -170,8 +174,10 @@ def garch(close: FloatArray, realized_fit: IntArray, fit_times: IntArray, fit_ra
     one_step = np.empty_like(r)
     persistence = np.empty(len(r))
     long_run = np.empty(len(r))
+    fitted = []
     for a in range(r.shape[0]):
         omega, alpha, beta = _garch_fit(r[a, fit_range])
+        fitted.append({"omega": omega, "alpha": alpha, "beta": beta})
         one_step[a] = _garch_variance(r[a], omega, alpha, beta)
         persistence[a] = alpha + beta
         long_run[a] = omega / (1 - alpha - beta)
@@ -187,7 +193,7 @@ def garch(close: FloatArray, realized_fit: IntArray, fit_times: IntArray, fit_ra
             )
         return out
 
-    return Baseline("garch(1,1)-t", sd, _fit_nu(sd, realized_fit, fit_times))
+    return Baseline("garch(1,1)-t", sd, _fit_nu(sd, realized_fit, fit_times), {"per_asset": fitted})
 
 
 def har(close: FloatArray, realized_fit: IntArray, fit_times: IntArray) -> Baseline:
@@ -211,7 +217,13 @@ def har(close: FloatArray, realized_fit: IntArray, fit_times: IntArray) -> Basel
                 out[a, j] = np.sqrt(np.maximum(x @ coefs[a, h], floor_var))
         return out
 
-    return Baseline("har-rv", sd, _fit_nu(sd, realized_fit, fit_times))
+    params = {
+        "windows": list(HAR_WINDOWS),
+        # [intercept, one coefficient per window] for each asset and horizon; the model is fitted on horizon-scaled
+        # trailing variances, so the variance forecast is ``c0 + sum(c_k * mean_k * h)``.
+        "per_asset": [{str(h): [float(c) for c in coefs[a, h]] for h in HORIZONS} for a in range(r2.shape[0])],
+    }
+    return Baseline("har-rv", sd, _fit_nu(sd, realized_fit, fit_times), params)
 
 
 def ladder(close: FloatArray, realized_fit: IntArray, fit_times: IntArray, fit_range: slice) -> list[Baseline]:
