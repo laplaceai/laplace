@@ -1,0 +1,108 @@
+"""Publishing the record to the public bucket served at https://data.laplaceprotocol.com.
+
+Only committed issues are published. Issue files never change once written, so they are cached for a year;
+``latest.json`` points at the newest published issue and is cached for a minute. Local marker files make publishing
+idempotent, and every run first catches up on committed issues whose upload failed.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Protocol
+
+from laplace_engine.release import canonical
+
+PREFIX = "v1"
+PUBLIC_URL = "https://data.laplaceprotocol.com/" + PREFIX
+IMMUTABLE = "public, max-age=31536000, immutable"
+FRESH = "public, max-age=60"
+ISSUE_FILES = ("manifest.json", "forecasts.json", "commitment.json")
+PUBLISHED = "published"
+
+log = logging.getLogger(__name__)
+
+
+class Store(Protocol):
+    def put(self, key: str, body: bytes, *, content_type: str, cache_control: str) -> None: ...
+
+
+class R2:
+    """Cloudflare R2 through its S3 API."""
+
+    def __init__(self, endpoint: str, access_key_id: str, secret_access_key: str, bucket: str) -> None:
+        import boto3
+        from botocore.config import Config
+
+        self._s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name="auto",
+            config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+        )
+        self._bucket = bucket
+
+    @classmethod
+    def from_env(cls) -> R2:
+        names = ("LAPLACE_R2_ENDPOINT", "LAPLACE_R2_ACCESS_KEY_ID", "LAPLACE_R2_SECRET_ACCESS_KEY", "LAPLACE_R2_BUCKET")
+        missing = [n for n in names if not os.environ.get(n)]
+        if missing:
+            raise RuntimeError(f"missing environment variables: {', '.join(missing)}")
+        return cls(*(os.environ[n] for n in names))
+
+    def put(self, key: str, body: bytes, *, content_type: str, cache_control: str) -> None:
+        self._s3.put_object(
+            Bucket=self._bucket, Key=key, Body=body, ContentType=content_type, CacheControl=cache_control
+        )
+
+
+def publish_issue(store: Store, issue_dir: Path, *, latest: bool) -> None:
+    """Upload a committed issue's files; with ``latest``, also point ``latest.json`` at it."""
+    issue = int(issue_dir.name)
+    for name in ISSUE_FILES:
+        key = f"{PREFIX}/issues/{issue}/{name}"
+        store.put(key, (issue_dir / name).read_bytes(), content_type="application/json", cache_control=IMMUTABLE)
+    if latest:
+        commitment = json.loads((issue_dir / "commitment.json").read_bytes())
+        pointer = {k: commitment[k] for k in ("issue", "root", "manifest", "tx", "block", "timestamp")}
+        pointer["files"] = {name: f"{PUBLIC_URL}/issues/{issue}/{name}" for name in ISSUE_FILES}
+        store.put(f"{PREFIX}/latest.json", canonical(pointer), content_type="application/json", cache_control=FRESH)
+    (issue_dir / PUBLISHED).touch()
+
+
+def pending(issues_dir: Path, *, limit: int = 48) -> list[Path]:
+    """Committed issues not yet published, oldest first, among the newest ``limit`` issues on disk."""
+    dirs = sorted((d for d in issues_dir.iterdir() if d.name.isdigit()), key=lambda d: int(d.name))[-limit:]
+    return [d for d in dirs if (d / "commitment.json").exists() and not (d / PUBLISHED).exists()]
+
+
+def publish_pending(store: Store, issues_dir: Path) -> list[int]:
+    """Publish every pending issue. ``latest.json`` only ever points at the newest committed issue, so catching up on
+    an older one never moves it back."""
+    if not issues_dir.exists():
+        return []
+    committed = [int(d.name) for d in issues_dir.iterdir() if d.name.isdigit() and (d / "commitment.json").exists()]
+    newest = max(committed, default=None)
+    todo = pending(issues_dir)
+    for issue_dir in todo:
+        publish_issue(store, issue_dir, latest=int(issue_dir.name) == newest)
+        log.info("published issue %s", issue_dir.name)
+    return [int(d.name) for d in todo]
+
+
+def publish_release(store: Store, release_dir: Path, name: str, marker: Path) -> None:
+    """Upload a release's file and public programs once."""
+    if marker.exists():
+        return
+    files: Iterable[Path] = [release_dir / "release.json", *sorted((release_dir / "programs").glob("*.py"))]
+    for path in files:
+        key = f"{PREFIX}/releases/{name}/{path.relative_to(release_dir).as_posix()}"
+        content_type = "application/json" if path.suffix == ".json" else "text/x-python; charset=utf-8"
+        store.put(key, path.read_bytes(), content_type=content_type, cache_control=IMMUTABLE)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
