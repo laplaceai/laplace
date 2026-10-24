@@ -1,0 +1,96 @@
+# The live record
+
+Every hour the engine *seals an issue*: each forecaster in the current release forecasts every question, the
+forecasts are rounded to basis points and hashed into a Merkle tree, and the tree's root is committed to
+`LaplaceLedger` on Robinhood Chain within the first 15 minutes of the hour, before the shortest question can
+settle. The files that describe the issue are then published, so anyone can rebuild the root, check it against the
+chain, and score the forecasts once they settle. Code: `engine/` ([README](../../engine/README.md)).
+
+## An hour
+1. **:00:30 UTC.** The engine fetches the last 744 hourly candles of every asset and waits until the candle that
+   closed at the top of the hour is published for all of them (at most until :10).
+2. **Forecasts.** Every program of the release runs once per question in a fresh process that only ever reads the
+   720 candles before the issue time (the same sandbox and past-only reader as in research). A program that fails
+   is listed in the manifest and has no forecasts that hour; a pool needs all its members.
+3. **Sealing.** Forecasts are rounded to basis points, pools are mixed from their members' rounded forecasts, and
+   the leaves are hashed into a tree. The manifest and the forecasts file are written to disk before anything is sent.
+4. **Commitment.** One transaction: `commit(issue, root, keccak256(manifest), leaves)`. The ledger accepts it only
+   from the committer, only for an issue after the last one, and only inside the issue's 15-minute window, so the
+   block timestamp proves when the forecasts were sealed. A missed hour stays visible as a gap.
+5. **Publication.** The manifest, the forecasts and the commitment's receipt go to
+   `https://data.laplaceprotocol.com/v1/issues/<issue>/` (`manifest.json`, `forecasts.json`, `commitment.json`).
+
+An issue is numbered by its hour: hours since the Unix epoch (issue 498,019 is 2026-10-24 19:00 UTC).
+
+## Questions
+For each of seven assets (BTC, ETH, SOL, XRP, DOGE, AVAX, LINK; an append-only registry, so an asset keeps its index)
+and each horizon h of 1, 4 and 24 hours: the probabilities of ten bins for the log return from the close of the last
+input candle (the hour before the issue) to the close of the hourly candle that ends h hours after the issue time.
+The bins are symmetric around zero with edges at ±0.3, 0.7, 1.5 and 3% (1 hour), ±0.6, 1.4, 3 and 6% (4 hours) and
+±1.5, 3.5, 7 and 14% (24 hours) of log return; the outer bins are open. Prices are Coinbase Exchange hourly candles
+for `<asset>-USD`. The manifest carries the last input candle of every asset, so the starting price of every question
+is part of the commitment.
+
+Forecasts are scored with the binned log score on the rounded forecast (`bps / 10,000`). Every bin holds at least one
+basis point, so no single outcome can cost more than log(10,000) ≈ 9.2 nats.
+
+## Forecasters and releases
+A release ([`engine/releases/r1/release.json`](../../engine/releases/r1/release.json)) fixes the forecasters:
+- **Programs** are identified by the keccak256 of their source. Baselines are public and live in the release
+  directory; evolved champions are private until revealed, and their identity is published from the first issue, so a
+  revealed program can be matched to its whole record. Before every run the engine checks each source against the
+  release.
+- **Pools** are linear pools of the release's programs with integer weights in parts per million. A pool's identity is
+  the keccak256 of its canonical specification (members and weights), and its forecast is mixed from the members'
+  *rounded* forecasts in integer arithmetic, so anyone can recompute it exactly from the published record.
+
+Release r1 is frozen from research run `evolve-poc2` exactly as its report judged it: the eight island champions,
+the Demon (the pool of champions, weights fitted on validation: seasonality 44.8%, ranges 24.5%, regimes 11.5%,
+clustering 10.8%, spillover 4.5%, tails 3.8%), and the baseline ladder (naive, EWMA, GARCH, HAR) with parameters
+fitted on the search window. See [the PoC 2 note](../research/2026-10-24-poc2-evolution.md) for what that
+configuration did on the holdout.
+
+The baselines run as ordinary programs on the same 720-hour window, so their recursions start from the window
+rather than from the start of the research panel, and HAR's 720-hour mean covers the window's 719 returns. Rerun over
+the PoC 2 holdout (11,487 questions), the naive, EWMA and GARCH programs match the research baselines to within
+0.0002 basis points; HAR differs by 0.13 basis points on average (at most 35, when an outlier hour sits at the edge
+of the window), which changes its mean log score by 0.00002 nats per question.
+
+## Formats
+**Leaf:** `keccak256(keccak256(abi.encode(uint64 issue, bytes32 forecaster, uint8 asset, uint16 horizon,
+uint16[10] bps)))`. Inner nodes hash the sorted pair of their children (OpenZeppelin's `MerkleProof` convention); an
+odd node at the end of a level is carried up unchanged. `LaplaceLedger.leafHash` computes the same leaf, and
+`verifyForecast(issue, forecaster, asset, horizon, bps, proof)` checks a forecast against the committed root, so a
+contract can use a forecast without trusting anyone. Shared test vectors keep the Python and Solidity
+implementations identical.
+
+**Manifest** (canonical JSON: sorted keys, no whitespace, ASCII; its keccak256 is committed): the issue and its time,
+the ledger, the engine version and git commit, the release, the feed definition, the inputs (the hash of the 720
+candles the programs saw, as little-endian float64 ordered hour, asset, field, and the last candle of every asset in
+full), the forecasters with their identities, any failures, the leaf encoding, the number of leaves and the root.
+
+**Forecasts:** every leaf as `{forecaster, asset, horizon, bps}`, plus the issue, the root and the manifest's hash.
+
+## Verifying an issue
+1. `keccak256(manifest.json)` equals the manifest hash in the issue's `Committed` event, the root equals
+   `rootOf(issue)`, and the commitment's block falls inside the issue's window.
+2. The leaves rebuilt from `forecasts.json` give that root, and every pool's forecasts are its members' forecasts
+   mixed with its weights. `laplace-engine verify` does steps 2 and 3 from the files alone.
+3. Public programs rerun on the candles the manifest identifies give the published forecasts (identical with the
+   locked dependencies; floating-point differences between library versions can move a rounding by a basis point).
+4. Once a private program is revealed, its source hashes to its identity, and rerunning it reproduces its record.
+
+## What it does not claim
+The record proves *when* each forecast was made and that it was not changed afterwards. It does not prove that
+nothing else was forecast and discarded: the release fixes the forecasters in advance and every hour lists all of
+them, failures included, which is what makes selective reporting visible. The committer key is the ledger's only
+trust assumption; if it were compromised, a new ledger would be deployed and announced, and the old record would
+stand as it is.
+
+## Deployments
+| contract | chain | address | status |
+|---|---|---|---|
+| LaplaceLedger v2 (stores roots, `verifyForecast`) | Robinhood Chain (4663) | `0x15AaE63A0EF391559153bCF9c56E5E2BE916b2BE` | current |
+| LaplaceLedger v1 (events only) | Robinhood Chain (4663) | `0x0E461fFCb4D0169eB5D87eceb309066ca1f95b26` | superseded before its first commit |
+
+Both are verified on Sourcify; the committer is `0x227c3530c600bdFdCB33bfbe5C8c86471f8dd7e2`.
