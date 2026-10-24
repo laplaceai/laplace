@@ -18,6 +18,9 @@ dev = [
   "ruff>=0.6",
 ]
 
+[project.scripts]
+laplace-engine = "laplace_engine.cli:main"
+
 [tool.uv.sources]
 laplace-research = { path = "../research", editable = true }
 
@@ -31,6 +34,8 @@ packages = ["src/laplace_engine"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+# A release's programs are identified by the hash of their exact bytes; never reformat them.
+extend-exclude = ["releases"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT"]
