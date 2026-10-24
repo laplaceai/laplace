@@ -188,6 +188,14 @@ def report(run_dir: Path, workers: int = 8) -> dict[str, Any]:
                     hours: interval(series, circular_block_indices(len(series), max(1, round(hours / step))))
                     for hours in SENSITIVITY_BLOCK_HOURS
                 },
+                # Secondary: the pre-declared comparison is over all horizons; these are not corrected for three looks.
+                "by_horizon": {
+                    f"h{h}": {
+                        "mean": float(np.mean((pooled - reference)[:, j])),
+                        "interval": interval((pooled - reference)[:, j].mean(axis=0).tolist(), indices),
+                    }
+                    for j, h in enumerate(HORIZONS)
+                },
             }
 
     best_single = max((r for r in rows if r["kind"] == "champion"), key=lambda r: r["validation_gain"], default=None)
@@ -305,6 +313,12 @@ def render(s: dict[str, Any]) -> str:
         for name, h in s["headline"].items():
             cis = " | ".join(f"{lo:+.4f}…{hi:+.4f}" for lo, hi in (h["intervals_by_block_hours"][k] for k in hours))
             lines.append(f"| {name} | {h['mean']:+.4f} | {cis} |")
+        lines += ["", f"By horizon ({s['block_hours']}h blocks; secondary, not corrected for three comparisons):", ""]
+        lines += ["| comparison | " + " | ".join(f"{h}h" for h in HORIZONS) + " |", "|---|" + "---|" * len(HORIZONS)]
+        for name, h in s["headline"].items():
+            cells = (h["by_horizon"][f"h{k}"] for k in HORIZONS)
+            row = " | ".join(f"{c['mean']:+.4f} ({c['interval'][0]:+.4f}…{c['interval'][1]:+.4f})" for c in cells)
+            lines.append(f"| {name} | {row} |")
     for label, p in s["pools"].items():
         lines += [
             "",
