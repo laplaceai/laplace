@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy import stats
 
 from laplace_research.evolve import baselines as b
 from laplace_research.evolve.evaluate import realized_bins, sample_times
@@ -26,6 +27,28 @@ def test_garch_variance_matches_the_recursion() -> None:
     for t in range(len(r)):
         prev = omega + alpha * r[t] ** 2 + beta * prev
         assert v[t] == pytest.approx(prev)
+
+
+def test_t_log_density_matches_scipy() -> None:
+    x = np.linspace(-0.1, 0.1, 41)
+    for nu in (2.5, 4.0, 30.0):
+        variance = np.full_like(x, 4e-4)
+        expected = stats.t.logpdf(x, nu, scale=np.sqrt(4e-4 * (nu - 2) / nu))
+        assert np.allclose(b._t_log_density(x, variance, nu), expected)
+
+
+def test_garch_fit_recovers_simulated_parameters() -> None:
+    # A wrong normalizing constant in the likelihood once rewarded nu -> infinity and left alpha and beta arbitrary.
+    rng = np.random.default_rng(1)
+    omega, alpha, beta, nu, n = 2e-6, 0.08, 0.9, 5.0, 20_000
+    var, r = omega / (1 - alpha - beta), np.empty(n)
+    for t in range(n):
+        r[t] = rng.standard_t(nu) * np.sqrt(var * (nu - 2) / nu)
+        var = omega + alpha * r[t] ** 2 + beta * var
+    fitted_omega, fitted_alpha, fitted_beta = b._garch_fit(r)
+    assert fitted_alpha == pytest.approx(alpha, abs=0.02)
+    assert fitted_beta == pytest.approx(beta, abs=0.03)
+    assert fitted_omega / (1 - fitted_alpha - fitted_beta) == pytest.approx(np.var(r), rel=1e-9)
 
 
 def test_seed_program_reproduces_the_naive_baseline(panel: Panel, history: Path) -> None:
