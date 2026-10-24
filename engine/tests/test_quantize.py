@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from laplace_engine.quantize import TOTAL, probabilities, to_basis_points
+from laplace_engine.quantize import TOTAL, WEIGHT_SCALE, mix_basis_points, probabilities, to_basis_points
 from laplace_research.evolve.feed import FLOOR, N_BINS, finalize
 
 
@@ -42,3 +42,27 @@ def test_round_trip_is_what_gets_scored() -> None:
 def test_rejects_non_forecasts(bad: np.ndarray) -> None:
     with pytest.raises(ValueError, match="not a forecast"):
         to_basis_points(bad)
+
+
+def test_pool_mixes_rounded_forecasts_exactly() -> None:
+    rng = np.random.default_rng(1)
+    for _ in range(500):
+        members = [to_basis_points(finalize(rng.dirichlet(np.full(N_BINS, 0.5)))) for _ in range(4)]
+        weights = [400_000, 300_000, 200_000, 100_000]
+        mixed = mix_basis_points(members, weights)
+        exact = np.asarray(weights) @ np.asarray(members) / WEIGHT_SCALE
+        assert sum(mixed) == TOTAL
+        assert np.max(np.abs(np.asarray(mixed) - exact)) < 1
+        assert mixed == mix_basis_points(members, weights)  # integer arithmetic: identical on every machine
+
+
+def test_a_pool_of_one_is_its_member() -> None:
+    member = to_basis_points(finalize(np.arange(1.0, N_BINS + 1)))
+    assert mix_basis_points([member], [WEIGHT_SCALE]) == member
+
+
+@pytest.mark.parametrize("weights", [[500_000, 400_000], [1_200_000, -200_000], [1_000_000]], ids=str)
+def test_pool_weights_must_be_a_partition_of_the_scale(weights: list[int]) -> None:
+    member = (1_000,) * N_BINS
+    with pytest.raises(ValueError, match="weights"):
+        mix_basis_points([member, member], weights)

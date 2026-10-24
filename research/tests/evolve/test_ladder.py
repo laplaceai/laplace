@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -70,3 +71,21 @@ def test_ladder_fits_and_returns_distributions(panel: Panel) -> None:
         p = rung.probs(fit[:5])
         assert p.shape == (len(panel.assets), len(HORIZONS), 5, N_BINS)
         assert np.allclose(p.sum(axis=-1), 1)
+
+
+def test_fitted_parameters_reproduce_the_forecasts(panel: Panel) -> None:
+    fit = sample_times(panel, utc(int(panel.ts[0])), utc(int(panel.ts[-1])), 3)
+    rungs = {r.name.split("(")[0]: r for r in b.ladder(panel.close, realized_bins(panel, fit), fit, slice(0, 900))}
+    for rung in rungs.values():
+        json.dumps(rung.params)  # frozen parameters must survive a round trip through a release file
+    t = np.array([1_000])
+    r = b.hourly_returns(panel.close)
+    for a, p in enumerate(rungs["garch"].params["per_asset"]):
+        one_step = b._garch_variance(r[a], p["omega"], p["alpha"], p["beta"])[t]
+        assert rungs["garch"].sd(t)[a, 0] == pytest.approx(np.sqrt(one_step))
+    features = np.stack([b.trailing_mean(r**2, w) for w in rungs["har-rv"].params["windows"]], axis=-1)[:, t[0]]
+    for a, by_horizon in enumerate(rungs["har-rv"].params["per_asset"]):
+        for j, h in enumerate(HORIZONS):
+            c = np.asarray(by_horizon[str(h)])
+            variance = max(c[0] + float(c[1:] @ features[a]) * h, 0.1 * features[a, 2] * h)
+            assert rungs["har-rv"].sd(t)[a, j, 0] == pytest.approx(np.sqrt(variance))
