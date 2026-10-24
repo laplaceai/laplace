@@ -1,4 +1,4 @@
-"""Command line: freeze a release; seal, commit and publish an issue; verify an issue; show recent issues."""
+"""Command line: freeze a release; seal, commit, publish and settle issues; verify an issue; scores; recent issues."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from pathlib import Path
 import httpx
 from eth_hash.auto import keccak
 
-from laplace_engine import candles, chain, issue, publish, release, verify
+from laplace_engine import candles, chain, issue, publish, release, settle, verify
+from laplace_research.data.candles import fetch_hourly
+from laplace_research.evolve.feed import product
 
 log = logging.getLogger("laplace_engine")
 
@@ -43,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     seal.add_argument("--wait-minutes", type=float, default=10.0, help="how long to wait for the candles")
     seal.add_argument("--commit", action="store_true", help="commit the root on-chain (key: LAPLACE_COMMIT_KEY_FILE)")
     seal.add_argument("--publish", action="store_true", help="publish committed issues (credentials: LAPLACE_R2_*)")
+    seal.add_argument("--settle", action="store_true", help="settle and score every question that has become due")
     seal.add_argument("--rpc", default=chain.RPC_URL)
     seal.add_argument("--ledger", default=chain.LEDGER)
 
@@ -53,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--offline", action="store_true", help="check the files only, not the chain")
     check.add_argument("--rpc", default=chain.RPC_URL)
     check.add_argument("--ledger", default=chain.LEDGER)
+
+    board = sub.add_parser("scoreboard", help="mean log scores and gains over the baselines, from settled questions")
+    board.add_argument("--data", type=Path, required=True)
 
     status = sub.add_parser("status", help="recent issues: sealed, committed, published")
     status.add_argument("--data", type=Path, required=True)
@@ -125,12 +131,36 @@ def cmd_issue(args: argparse.Namespace) -> int:
         except Exception:
             log.exception("issue %d: commit failed", number)  # still publish the backlog below
             ok = False
+    issues = args.data / "issues"
+    settled = settle.settle_due(issues, number, coinbase_close(args.data / "candles")) if args.settle else []
+    if settled:
+        log.info("settled %d question sets", len(settled))
     if args.publish:
         store = publish.R2.from_env()
         name = json.loads((args.release / release.RELEASE_FILE).read_text())["release"]
         publish.publish_release(store, args.release, name, args.data / "releases" / f"{name}.published")
-        publish.publish_pending(store, args.data / "issues")
+        publish.publish_pending(store, issues)
+        if publish.publish_settlements(store, issues):
+            publish.publish_scoreboard(store, settle.scoreboard(settle.load_settlements(issues)))
     return 0 if ok else 1
+
+
+def coinbase_close(cache_dir: Path) -> settle.FetchClose:
+    """The close of one public exchange candle, for questions whose settling issue was never committed."""
+    client = httpx.Client(timeout=30.0, headers={"User-Agent": "laplace-engine"})
+
+    def fetch(asset: str, open_time: int) -> float:
+        start = datetime.fromtimestamp(open_time, UTC)
+        found = [
+            c
+            for c in fetch_hourly(product(asset), start, start + timedelta(hours=1), client=client, cache_dir=cache_dir)
+            if c.ts == open_time
+        ]
+        if not found:
+            raise ValueError(f"{asset}: no candle opening at {start:%Y-%m-%d %H:%M}")
+        return found[0].close
+
+    return fetch
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -167,6 +197,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if all(checks.values()) else 1
 
 
+def cmd_scoreboard(args: argparse.Namespace) -> int:
+    board = settle.scoreboard(settle.load_settlements(args.data / "issues"))
+    print(f"{board['settled_issues']} settled issues ({board['first_issue']} to {board['last_issue']})")
+    print(
+        f"{'forecaster':12s} {'questions':>9s} {'log score':>9s}  " + "  ".join(f"vs {b:>6s}" for b in settle.BASELINES)
+    )
+    for name, entry in sorted(board["forecasters"].items(), key=lambda kv: -kv[1]["mean_log_score"]):
+        gains = "  ".join(f"{entry['vs'][b]['mean']:+9.4f}" if b in entry["vs"] else " " * 9 for b in settle.BASELINES)
+        print(f"{name:12s} {entry['questions']:9d} {entry['mean_log_score']:9.4f}  {gains}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     newest = candles.current_issue()
     for number in range(newest - args.hours + 1, newest + 1):
@@ -187,7 +229,13 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     args = build_parser().parse_args(argv)
-    commands = {"release": cmd_release, "issue": cmd_issue, "verify": cmd_verify, "status": cmd_status}
+    commands = {
+        "release": cmd_release,
+        "issue": cmd_issue,
+        "verify": cmd_verify,
+        "scoreboard": cmd_scoreboard,
+        "status": cmd_status,
+    }
     return commands[args.command](args)
 
 

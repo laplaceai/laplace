@@ -19,6 +19,8 @@ chain, and score the forecasts once they settle. Code: `engine/` ([README](../..
    block timestamp proves when the forecasts were sealed. A missed hour stays visible as a gap.
 5. **Publication.** The manifest, the forecasts and the commitment's receipt go to
    `https://data.laplaceprotocol.com/v1/issues/<issue>/` (`manifest.json`, `forecasts.json`, `commitment.json`).
+6. **Settlement.** Every question that has become due is scored (`settlement-<h>h.json` next to its issue), and
+   `v1/scoreboard.json` is rebuilt from all settlements.
 
 An issue is numbered by its hour: hours since the Unix epoch (issue 498,019 is 2026-10-24 19:00 UTC).
 
@@ -33,6 +35,18 @@ is part of the commitment.
 
 Forecasts are scored with the binned log score on the rounded forecast (`bps / 10,000`). Every bin holds at least one
 basis point, so no single outcome can cost more than log(10,000) ≈ 9.2 nats.
+
+## Settlement and scores
+A question of issue N at horizon h settles on the close of the candle that ends at the start of issue N + h, and that
+candle is issue N + h's last input candle: its close is in N + h's manifest, committed on-chain. So scores normally
+follow from committed files alone, and anyone can recompute them. If issue N + h was never committed, the question
+settles on the exchange's public candle instead, so a missing hour can never hide an outcome; the settlement file
+names its source either way. The committed prices themselves can be checked against the exchange's public candles.
+
+The scoreboard lists each forecaster's mean log score (overall and by horizon) and its paired gain over the naive,
+GARCH and HAR baselines on the questions both answered, issues weighted equally, with a 95% circular block-bootstrap
+interval over issues (72-hour blocks). Until two blocks of issues have settled it shows no interval at all: a few days
+of a small edge are a direction, not a verdict.
 
 ## Forecasters and releases
 A release ([`engine/releases/r1/release.json`](../../engine/releases/r1/release.json)) fixes the forecasters:

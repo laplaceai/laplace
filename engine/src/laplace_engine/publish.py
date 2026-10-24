@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from laplace_engine.release import canonical
 
@@ -106,3 +106,21 @@ def publish_release(store: Store, release_dir: Path, name: str, marker: Path) ->
         store.put(key, path.read_bytes(), content_type=content_type, cache_control=IMMUTABLE)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
+
+
+def publish_settlements(store: Store, issues_dir: Path) -> int:
+    """Upload every settlement file not uploaded yet; returns how many were."""
+    count = 0
+    for path in sorted(issues_dir.glob("*/settlement-*h.json")):
+        marker = path.with_name(path.name + "." + PUBLISHED)
+        if marker.exists():
+            continue
+        key = f"{PREFIX}/issues/{path.parent.name}/{path.name}"
+        store.put(key, path.read_bytes(), content_type="application/json", cache_control=IMMUTABLE)
+        marker.touch()
+        count += 1
+    return count
+
+
+def publish_scoreboard(store: Store, board: dict[str, Any]) -> None:
+    store.put(f"{PREFIX}/scoreboard.json", canonical(board), content_type="application/json", cache_control=FRESH)
