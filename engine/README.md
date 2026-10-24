@@ -37,10 +37,11 @@ uv run laplace-engine status --data DATA_DIR        # sealed, committed, publish
 uv run laplace-engine scoreboard --data DATA_DIR    # mean log scores and gains over the baselines
 ```
 
-Each run seals the issue (never resealing one that exists on disk), commits it if the window is still open (a rerun
-recovers an existing commitment instead of sending a second transaction), settles every question that has become due,
-then publishes every committed issue, settlement and the scoreboard that are not yet public. A missed hour stays a
-visible gap in the ledger.
+Each run holds a lock, seals the issue (never resealing one that exists on disk), commits it while the window is
+open (journaled, retried, and read back from the chain), reconciles older issues (recovering commitments that were
+never recorded, marking real gaps), publishes every committed issue that is not yet public after checking it against
+its commitment, then settles every question that has become due and publishes the settlements and the scoreboard.
+Every step is isolated and retried on the next run; `status` shows gaps and conflicts.
 
 | module | |
 |---|---|
