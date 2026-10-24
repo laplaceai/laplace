@@ -22,6 +22,12 @@ contract LaplaceLedgerTest is Test {
         vm.prank(committer);
         ledger.commit(ISSUE, ROOT, MANIFEST, 231);
         assertEq(ledger.lastIssue(), ISSUE);
+        assertEq(ledger.rootOf(ISSUE), ROOT);
+    }
+
+    function test_RequiresACommitter() public {
+        vm.expectRevert(LaplaceLedger.ZeroCommitter.selector);
+        new LaplaceLedger(address(0));
     }
 
     function test_RejectsAnyoneButTheCommitter(address caller) public {
@@ -41,6 +47,7 @@ contract LaplaceLedgerTest is Test {
         vm.expectRevert(abi.encodeWithSelector(LaplaceLedger.IssueNotAfterLast.selector, ISSUE + 2, ISSUE + 3));
         ledger.commit(ISSUE + 2, ROOT, MANIFEST, 231);
         vm.stopPrank();
+        assertEq(ledger.rootOf(ISSUE + 2), bytes32(0));
     }
 
     function test_RejectsCommitsBeforeTheIssueHour() public {
@@ -83,6 +90,57 @@ contract LaplaceLedgerTest is Test {
             assertEq(ledger.lastIssue(), issue);
         } catch {
             assertGe(offset, ledger.COMMIT_WINDOW());
+        }
+    }
+
+    /// The engine's test vectors: its leaf hashes match `leafHash`, its proofs verify against its root, and a forecast
+    /// changed by a single basis point does not.
+    function test_VerifiesTheEngineVectors() public {
+        string memory json = vm.readFile(string.concat(vm.projectRoot(), "/test/vectors/record.json"));
+        uint64 issue = uint64(vm.parseJsonUint(json, ".issue"));
+        uint256 count = vm.parseJsonUint(json, ".count");
+        vm.warp(uint256(issue) * 1 hours + 1 minutes);
+        vm.prank(committer);
+        ledger.commit(issue, vm.parseJsonBytes32(json, ".root"), MANIFEST, uint32(count));
+
+        for (uint256 i; i < count; ++i) {
+            string memory at = string.concat(".leaves[", vm.toString(i), "]");
+            bytes32 forecaster = vm.parseJsonBytes32(json, string.concat(at, ".forecaster"));
+            uint8 asset = uint8(vm.parseJsonUint(json, string.concat(at, ".asset")));
+            uint16 horizon = uint16(vm.parseJsonUint(json, string.concat(at, ".horizon")));
+            uint16[10] memory bps = _bps(vm.parseJsonUintArray(json, string.concat(at, ".bps")));
+            bytes32[] memory proof = vm.parseJsonBytes32Array(json, string.concat(at, ".proof"));
+
+            assertEq(
+                ledger.leafHash(issue, forecaster, asset, horizon, bps),
+                vm.parseJsonBytes32(json, string.concat(at, ".hash"))
+            );
+            assertTrue(ledger.verifyForecast(issue, forecaster, asset, horizon, bps, proof));
+            assertFalse(ledger.verifyForecast(issue + 1, forecaster, asset, horizon, bps, proof));
+            assertFalse(ledger.verifyForecast(issue, forecaster, asset, horizon == 1 ? 4 : 1, bps, proof));
+            (bps[4], bps[5]) = (bps[4] + 1, bps[5] - 1);
+            assertFalse(ledger.verifyForecast(issue, forecaster, asset, horizon, bps, proof));
+        }
+    }
+
+    function test_ASingleForecastIsItsOwnRoot() public {
+        uint16[10] memory bps = [uint16(1), 99, 900, 2000, 2000, 2000, 2000, 900, 99, 1];
+        bytes32 leaf = ledger.leafHash(ISSUE, keccak256("program"), 0, 24, bps);
+        vm.prank(committer);
+        ledger.commit(ISSUE, leaf, MANIFEST, 1);
+        assertTrue(ledger.verifyForecast(ISSUE, keccak256("program"), 0, 24, bps, new bytes32[](0)));
+    }
+
+    function test_NothingVerifiesForAnUncommittedIssue() public view {
+        uint16[10] memory bps;
+        bytes32[] memory proof = new bytes32[](0);
+        assertFalse(ledger.verifyForecast(ISSUE, bytes32(0), 0, 1, bps, proof));
+    }
+
+    function _bps(uint256[] memory raw) private pure returns (uint16[10] memory out) {
+        assertEq(raw.length, 10);
+        for (uint256 j; j < 10; ++j) {
+            out[j] = uint16(raw[j]);
         }
     }
 }

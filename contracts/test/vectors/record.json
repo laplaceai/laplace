@@ -1,0 +1,176 @@
+{
+ "issue": 497983,
+ "root": "0x032d67cc258c91f03980c133f797fda5dfbc2f6f32941cfcb75bd8e515ee0307",
+ "count": 7,
+ "assets": [
+  "BTC",
+  "ETH",
+  "SOL",
+  "XRP",
+  "DOGE",
+  "AVAX",
+  "LINK"
+ ],
+ "leaves": [
+  {
+   "forecaster": "0xfde606fcfa4c2b2025edf1bc21d4454d6636ab73592babc0b3179f02a6296da6",
+   "asset": 0,
+   "horizon": 1,
+   "bps": [
+    1,
+    26,
+    397,
+    1310,
+    3266,
+    3266,
+    1310,
+    397,
+    26,
+    1
+   ],
+   "hash": "0x7c946e68049cba39bb023120dcbcd0d31d12e3324ee7cfacb586efa991f645fa",
+   "proof": [
+    "0xa0440f5ed6368b00b88d3324e80a8a77682d6167465462ccc6af108c97df4221",
+    "0xc7de6257d9526d2b7b4b460a2a140640a662235d5e119b929850d7d27670edb7",
+    "0xdbc4db3c0e41e2e17adac993a829acf57570c1b2552f93387c58435938d06ab7"
+   ]
+  },
+  {
+   "forecaster": "0x7bc1ba352b8e71e33fd4eb255caabee8e36647f38e39e98b83f0d9bf2f7b6150",
+   "asset": 0,
+   "horizon": 4,
+   "bps": [
+    3,
+    29,
+    313,
+    1400,
+    3255,
+    3255,
+    1400,
+    313,
+    29,
+    3
+   ],
+   "hash": "0x7b569f704def304a1245507c537ba8b526a961d8654d0315ff155a67d3d916a2",
+   "proof": [
+    "0x575a7e96606d6f1c65bbf84be259de8adf3f4dfa653b1498c311bde60f199437",
+    "0x5e9d20c03f1d13f97ba13b0343ce674c3e02ae1268f2342ec311c116a603323a",
+    "0x88f764173541e41aac1c309a37fd1003ea6e4ffe7df75a7497cceab35422837e"
+   ]
+  },
+  {
+   "forecaster": "0x7bc1ba352b8e71e33fd4eb255caabee8e36647f38e39e98b83f0d9bf2f7b6150",
+   "asset": 0,
+   "horizon": 24,
+   "bps": [
+    1,
+    33,
+    369,
+    1293,
+    3304,
+    3304,
+    1293,
+    369,
+    33,
+    1
+   ],
+   "hash": "0x575a7e96606d6f1c65bbf84be259de8adf3f4dfa653b1498c311bde60f199437",
+   "proof": [
+    "0x7b569f704def304a1245507c537ba8b526a961d8654d0315ff155a67d3d916a2",
+    "0x5e9d20c03f1d13f97ba13b0343ce674c3e02ae1268f2342ec311c116a603323a",
+    "0x88f764173541e41aac1c309a37fd1003ea6e4ffe7df75a7497cceab35422837e"
+   ]
+  },
+  {
+   "forecaster": "0xfde606fcfa4c2b2025edf1bc21d4454d6636ab73592babc0b3179f02a6296da6",
+   "asset": 1,
+   "horizon": 1,
+   "bps": [
+    20,
+    289,
+    1318,
+    1685,
+    1688,
+    1688,
+    1685,
+    1318,
+    289,
+    20
+   ],
+   "hash": "0xa0440f5ed6368b00b88d3324e80a8a77682d6167465462ccc6af108c97df4221",
+   "proof": [
+    "0x7c946e68049cba39bb023120dcbcd0d31d12e3324ee7cfacb586efa991f645fa",
+    "0xc7de6257d9526d2b7b4b460a2a140640a662235d5e119b929850d7d27670edb7",
+    "0xdbc4db3c0e41e2e17adac993a829acf57570c1b2552f93387c58435938d06ab7"
+   ]
+  },
+  {
+   "forecaster": "0x7bc1ba352b8e71e33fd4eb255caabee8e36647f38e39e98b83f0d9bf2f7b6150",
+   "asset": 1,
+   "horizon": 4,
+   "bps": [
+    26,
+    328,
+    1098,
+    1491,
+    2057,
+    2057,
+    1491,
+    1098,
+    328,
+    26
+   ],
+   "hash": "0xc7de6257d9526d2b7b4b460a2a140640a662235d5e119b929850d7d27670edb7",
+   "proof": [
+    "0x309dadf7e6ff87c9ea41c5119df36fb425612f0c17aa240aaeaaf4c7341898c7",
+    "0xdbc4db3c0e41e2e17adac993a829acf57570c1b2552f93387c58435938d06ab7"
+   ]
+  },
+  {
+   "forecaster": "0x7bc1ba352b8e71e33fd4eb255caabee8e36647f38e39e98b83f0d9bf2f7b6150",
+   "asset": 1,
+   "horizon": 24,
+   "bps": [
+    18,
+    350,
+    1297,
+    1687,
+    1648,
+    1648,
+    1687,
+    1297,
+    350,
+    18
+   ],
+   "hash": "0x13268f6586155fe8375204c879b10c8dd9bea193ac0f2d217502c1a2a362430d",
+   "proof": [
+    "0x547a7da63b5ca130fdb4d8aeab8cac104423fbb7647f77298efe436dea74c9a7",
+    "0x8183b7a9d26bc716df24fd8767e15819721a27b2525d548689d4c5ea49a52c93",
+    "0x88f764173541e41aac1c309a37fd1003ea6e4ffe7df75a7497cceab35422837e"
+   ]
+  },
+  {
+   "forecaster": "0xfde606fcfa4c2b2025edf1bc21d4454d6636ab73592babc0b3179f02a6296da6",
+   "asset": 2,
+   "horizon": 1,
+   "bps": [
+    147,
+    708,
+    1337,
+    1319,
+    1489,
+    1489,
+    1319,
+    1337,
+    708,
+    147
+   ],
+   "hash": "0x547a7da63b5ca130fdb4d8aeab8cac104423fbb7647f77298efe436dea74c9a7",
+   "proof": [
+    "0x13268f6586155fe8375204c879b10c8dd9bea193ac0f2d217502c1a2a362430d",
+    "0x8183b7a9d26bc716df24fd8767e15819721a27b2525d548689d4c5ea49a52c93",
+    "0x88f764173541e41aac1c309a37fd1003ea6e4ffe7df75a7497cceab35422837e"
+   ]
+  }
+ ]
+}

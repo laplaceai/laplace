@@ -2,38 +2,35 @@
 pragma solidity 0.8.30;
 
 /// @title LaplaceLedger
-/// @notice An append-only record of hourly forecast commitments.
-/// @dev Each issue commits a Merkle root over every forecast made at that hour, plus the hash of a manifest that says
-/// how to verify it. A root can only be committed during the first `COMMIT_WINDOW` seconds of its issue hour, so the
-/// block timestamp proves it was sealed before even the shortest (one-hour) outcome could be known. Issues only move
-/// forward: nothing can be rewritten or backdated, and a missed hour stays visible as a gap. The committer is fixed
-/// at deployment; rotating it means deploying a new ledger.
+/// @notice An append-only record of Laplace's hourly forecasts. At the start of every hour the committer posts the
+/// Merkle root of all forecasts made at that hour, within 15 minutes and so before any of them can settle. The root is
+/// kept on-chain: any contract can check a forecast against it with `verifyForecast`.
+/// @dev Leaves and proofs follow OpenZeppelin's `MerkleProof` conventions: a leaf is the double keccak of its ABI
+/// encoding, and inner nodes hash the sorted pair of their children.
 contract LaplaceLedger {
-    /// @notice Seconds after the start of an issue hour during which its root can still be committed.
     uint256 public constant COMMIT_WINDOW = 15 minutes;
 
-    /// @notice The only address allowed to commit.
     address public immutable committer;
-
-    /// @notice The latest committed issue, as a unix hour (unix time / 3600); zero before the first commit.
     uint64 public lastIssue;
+    mapping(uint64 issue => bytes32 root) public rootOf;
 
-    /// @param issue The unix hour at whose start the forecasts were made.
-    /// @param root Merkle root over every forecast leaf of the issue.
-    /// @param manifest Hash of the issue's manifest (file locations, program hashes, feed version, data snapshot).
-    /// @param leaves Number of leaves under the root.
+    /// @param issue The forecast hour, in hours since the Unix epoch.
+    /// @param root Merkle root over the issue's forecasts.
+    /// @param manifest Hash of the manifest that defines the questions, forecasters and inputs.
+    /// @param leaves Number of forecasts under the root.
     event Committed(uint64 indexed issue, bytes32 root, bytes32 manifest, uint32 leaves);
 
     error NotCommitter();
     error IssueNotAfterLast(uint64 issue, uint64 lastIssue);
     error OutsideCommitWindow(uint64 issue, uint256 timestamp);
     error EmptyCommitment();
+    error ZeroCommitter();
 
     constructor(address committer_) {
+        if (committer_ == address(0)) revert ZeroCommitter();
         committer = committer_;
     }
 
-    /// @notice Commit the forecasts of `issue`. Callable once per issue, in increasing order, inside its window.
     function commit(uint64 issue, bytes32 root, bytes32 manifest, uint32 leaves) external {
         if (msg.sender != committer) revert NotCommitter();
         if (issue <= lastIssue) revert IssueNotAfterLast(issue, lastIssue);
@@ -45,6 +42,44 @@ contract LaplaceLedger {
         }
         if (root == bytes32(0) || manifest == bytes32(0) || leaves == 0) revert EmptyCommitment();
         lastIssue = issue;
+        rootOf[issue] = root;
         emit Committed(issue, root, manifest, leaves);
+    }
+
+    /// @notice The leaf of one forecast.
+    /// @param forecaster keccak256 of the forecaster's definition (a program's source or a pool's specification).
+    /// @param asset Index into the feed's append-only asset registry.
+    /// @param horizon Hours ahead.
+    /// @param bps Probabilities of the ten return bins in basis points, summing to 10,000.
+    function leafHash(uint64 issue, bytes32 forecaster, uint8 asset, uint16 horizon, uint16[10] calldata bps)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(bytes.concat(keccak256(abi.encode(issue, forecaster, asset, horizon, bps))));
+    }
+
+    /// @notice Whether this forecast is in the record committed for `issue`.
+    /// @param proof Sibling hashes from the leaf up to the root.
+    function verifyForecast(
+        uint64 issue,
+        bytes32 forecaster,
+        uint8 asset,
+        uint16 horizon,
+        uint16[10] calldata bps,
+        bytes32[] calldata proof
+    ) external view returns (bool) {
+        bytes32 root = rootOf[issue];
+        if (root == bytes32(0)) return false;
+        bytes32 node = leafHash(issue, forecaster, asset, horizon, bps);
+        for (uint256 i; i < proof.length; ++i) {
+            bytes32 sibling = proof[i];
+            node = node < sibling ? _hashPair(node, sibling) : _hashPair(sibling, node);
+        }
+        return node == root;
+    }
+
+    function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
+        return keccak256(abi.encode(a, b));
     }
 }
