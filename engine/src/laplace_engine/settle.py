@@ -3,38 +3,45 @@
 A question of issue N at horizon h settles on the close of the hourly candle that ends at the start of issue N + h.
 That candle is issue N + h's last input candle, which its manifest carries and the chain commits, so every score of
 issue N at horizon h normally follows from committed files alone. The starting price is issue N's own last input
-candle. If issue N + h was never committed, the question settles on the exchange's public candle instead, so a missing
-hour can never hide an outcome. Each forecast is scored with the binned log score of its rounded probabilities.
+candle. If issue N + h was never committed, the question settles on the exchange's public candle instead (the last
+close at or before that hour, as the feed defines an hour without trades), so a missing hour can never hide an outcome.
+Each forecast is scored with the binned log score of its rounded probabilities.
 
-The scoreboard aggregates every settlement: each forecaster's mean log score, and its paired gain over each baseline
-with a circular block-bootstrap interval over issues.
+The scoreboard aggregates every settlement per forecaster identity (so a refitted program under an old name is a new
+entry): its mean log score, and its paired gain over each baseline with a circular block-bootstrap interval over
+issues.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean
 from typing import Any
 
 import numpy as np
 
+from laplace_engine import bootstrap
+from laplace_engine.files import write_atomic
 from laplace_engine.quantize import TOTAL
 from laplace_engine.release import canonical
 from laplace_research.evolve.feed import HORIZONS, bin_index
-from laplace_research.scoring import circular_block_indices, interval
 
 CLOSE = 3  # position of the close in a manifest's last_candle entries (open, high, low, close, volume)
 SCHEMA = "laplace/settlement/1"
 BOARD_SCHEMA = "laplace/scoreboard/1"
 BLOCK_ISSUES = 72  # bootstrap blocks of 72 hourly issues, as in research
+MIN_BLOCKS = 2  # below two blocks of issues, no interval is shown
 BASELINES = ("naive", "garch", "har")
 
-FetchClose = Callable[[str, int], float]  # (asset, candle open time) -> close
+FetchClose = Callable[[str, int], float]  # (asset, hour start) -> close of the last candle opening at or before it
+
+log = logging.getLogger(__name__)
 
 
 def settlement_name(horizon: int) -> str:
@@ -49,11 +56,13 @@ def closes(manifest: dict[str, Any]) -> dict[str, float]:
 class Settlement:
     issue: int
     horizon: int
-    source: str  # "issue <n>" when the settling price is committed, else "coinbase"
+    source: str  # "issue <n>" when the settling prices are committed, else "coinbase"
     start: dict[str, float]
     end: dict[str, float]
     bins: dict[str, int]
-    scores: dict[str, dict[str, float]]  # forecaster -> asset -> log score in nats
+    scores: dict[str, dict[str, float]]  # forecaster name -> asset -> log score in nats
+    release: str = ""
+    ids: dict[str, str] = field(default_factory=dict)  # forecaster name -> identity
 
     def to_json(self) -> bytes:
         returns = {a: math.log(self.end[a] / self.start[a]) for a in self.start}
@@ -63,6 +72,8 @@ class Settlement:
                 "issue": self.issue,
                 "horizon": self.horizon,
                 "source": self.source,
+                "release": self.release,
+                "ids": self.ids,
                 "start": self.start,
                 "end": self.end,
                 "returns": returns,
@@ -74,107 +85,158 @@ class Settlement:
     @classmethod
     def from_json(cls, data: bytes) -> Settlement:
         b = json.loads(data)
-        return cls(b["issue"], b["horizon"], b["source"], b["start"], b["end"], b["bins"], b["scores"])
+        return cls(
+            b["issue"], b["horizon"], b["source"], b["start"], b["end"], b["bins"], b["scores"], b["release"], b["ids"]
+        )
 
 
 def settle(
     manifest: dict[str, Any], forecasts: dict[str, Any], horizon: int, end: dict[str, float], source: str
 ) -> Settlement:
-    """Score an issue's forecasts at ``horizon`` given the settling closes ``end``."""
+    """Score an issue's forecasts at ``horizon`` given settling closes for (at least) the issue's assets."""
     assets = manifest["feed"]["assets"]
-    if horizon not in manifest["feed"]["horizons"] or set(end) != set(assets):
-        raise ValueError("the settling prices do not match the issue's questions")
+    if horizon not in manifest["feed"]["horizons"]:
+        raise ValueError(f"issue {manifest['issue']} has no {horizon}h questions")
+    missing = [a for a in assets if a not in end]
+    if missing:
+        raise ValueError(f"no settling price for {', '.join(missing)}")
     start = closes(manifest)
+    end = {a: float(end[a]) for a in assets}  # a later issue may list more assets; only the issue's own are settled
     bins = {a: int(bin_index(np.array([math.log(end[a] / start[a])]), horizon)[0]) for a in assets}
     scores: dict[str, dict[str, float]] = {}
     for f in forecasts["forecasts"]:
         if f["horizon"] == horizon:
             scores.setdefault(f["forecaster"], {})[f["asset"]] = math.log(f["bps"][bins[f["asset"]]] / TOTAL)
-    return Settlement(manifest["issue"], horizon, source, start, end, bins, scores)
+    ids = {x["name"]: x["id"] for x in manifest["forecasters"] if x["name"] in scores}
+    return Settlement(manifest["issue"], horizon, source, start, end, bins, scores, manifest["release"], ids)
 
 
 def _committed(issue_dir: Path) -> bool:
     return (issue_dir / "manifest.json").exists() and (issue_dir / "commitment.json").exists()
 
 
-def settle_due(issues_dir: Path, current: int, fetch_close: FetchClose, *, lookback: int = 72) -> list[Path]:
-    """Write every settlement that has become due for committed issues of the last ``lookback`` hours.
+def _settling_prices(
+    issues_dir: Path, assets: Sequence[str], due: int, current: int, fetch_close: FetchClose
+) -> tuple[dict[str, float], str] | None:
+    """The closes a question due at issue ``due`` settles on, or None while it must wait."""
+    later = issues_dir / str(due)
+    if _committed(later):
+        prices = closes(json.loads((later / "manifest.json").read_bytes()))
+        if all(a in prices for a in assets):
+            return prices, f"issue {due}"
+    elif due >= current:
+        return None  # the current issue may still be committed in this hour
+    return {a: fetch_close(a, (due - 1) * 3600) for a in assets}, "coinbase"
 
-    Issue N at horizon h is due once issue N + h has started. It settles on issue N + h's committed prices if N + h is
-    committed, on the exchange's candle if N + h is in the past and uncommitted, and waits if N + h is the current issue
-    and not committed yet (its commit may still be in flight).
+
+def settle_due(issues_dir: Path, current: int, fetch_close: FetchClose) -> list[Path]:
+    """Write every settlement that has become due for committed issues, however old.
+
+    Issue N at horizon h is due once issue N + h has started. A question that cannot be settled now (the exchange is
+    unreachable, say) is logged and retried on the next run; it never blocks the others.
     """
     written = []
-    for issue in range(current - lookback, current):
-        issue_dir = issues_dir / str(issue)
-        if not _committed(issue_dir):
+    dirs = sorted((d for d in issues_dir.iterdir() if d.name.isdigit()), key=lambda d: int(d.name))
+    for issue_dir in dirs:
+        issue = int(issue_dir.name)
+        if issue >= current or not _committed(issue_dir):
             continue
-        manifest = json.loads((issue_dir / "manifest.json").read_bytes())
+        manifest: dict[str, Any] | None = None
         forecasts: dict[str, Any] | None = None
-        for h in manifest["feed"]["horizons"]:
-            target, later = issue_dir / settlement_name(h), issues_dir / str(issue + h)
+        for h in HORIZONS:
+            target = issue_dir / settlement_name(h)
             if target.exists() or issue + h > current:
                 continue
-            if _committed(later):
-                end, source = closes(json.loads((later / "manifest.json").read_bytes())), f"issue {issue + h}"
-            elif issue + h < current:
-                end = {a: fetch_close(a, (issue + h - 1) * 3600) for a in manifest["feed"]["assets"]}
-                source = "coinbase"
-            else:
-                continue
-            forecasts = forecasts or json.loads((issue_dir / "forecasts.json").read_bytes())
-            target.write_bytes(settle(manifest, forecasts, h, end, source).to_json())
-            written.append(target)
+            try:
+                manifest = manifest or json.loads((issue_dir / "manifest.json").read_bytes())
+                if h not in manifest["feed"]["horizons"]:
+                    continue
+                prices = _settling_prices(issues_dir, manifest["feed"]["assets"], issue + h, current, fetch_close)
+                if prices is None:
+                    continue
+                forecasts = forecasts or json.loads((issue_dir / "forecasts.json").read_bytes())
+                write_atomic(target, settle(manifest, forecasts, h, *prices).to_json())
+                written.append(target)
+            except Exception:
+                log.exception("issue %d: could not settle the %dh questions yet", issue, h)
     return written
 
 
 def load_settlements(issues_dir: Path) -> list[Settlement]:
-    paths = sorted(issues_dir.glob("*/settlement-*h.json"))
-    return [Settlement.from_json(p.read_bytes()) for p in paths]
+    return [Settlement.from_json(p.read_bytes()) for p in sorted(issues_dir.glob("*/settlement-*h.json"))]
+
+
+def _comparison(series: dict[int, float]) -> dict[str, Any]:
+    """Mean of a per-issue series and its interval, in issue order; no interval for short records."""
+    values = [series[i] for i in sorted(series)]
+    ci = None
+    if len(values) >= MIN_BLOCKS * BLOCK_ISSUES:
+        ci = list(bootstrap.interval(values, BLOCK_ISSUES))
+    return {"mean": fmean(values), "interval95": ci, "issues": len(values)}
 
 
 def scoreboard(settlements: Sequence[Settlement], *, baselines: Iterable[str] = BASELINES) -> dict[str, Any]:
-    """Mean log scores per forecaster (overall and by horizon) and paired gains over each baseline, with 95% circular
-    block-bootstrap intervals over issues. Only questions both sides forecast are compared."""
-    scores: dict[str, dict[tuple[int, int, str], float]] = defaultdict(dict)  # forecaster -> (issue, h, asset) -> score
+    """Per forecaster identity: questions, mean log score overall and by horizon, and paired gains over each baseline.
+
+    A gain is the mean over issues (each weighted equally) of the issue's mean score difference on the questions both
+    answered. Overall gains use only issues whose every horizon has settled for both sides, so a young issue with only
+    its 1-hour questions settled does not count as a whole issue; per-horizon gains use every settled issue.
+    """
+    # identity -> (issue, horizon, asset) -> score; names and releases kept for display and pairing
+    scores: dict[str, dict[tuple[int, int, str], float]] = defaultdict(dict)
+    labels: dict[str, tuple[str, str]] = {}
+    by_name: dict[tuple[int, str], str] = {}  # (issue, name) -> identity, to pair with that issue's baselines
     for s in settlements:
         for name, by_asset in s.scores.items():
+            ident = s.ids.get(name, f"{s.release}:{name}")
+            labels[ident] = (name, s.release)
+            by_name[(s.issue, name)] = ident
             for asset, value in by_asset.items():
-                scores[name][(s.issue, s.horizon, asset)] = value
+                scores[ident][(s.issue, s.horizon, asset)] = value
+    issues = sorted({s.issue for s in settlements})
     board: dict[str, Any] = {
         "schema": BOARD_SCHEMA,
-        "issues": sorted({s.issue for s in settlements}),
+        "first_issue": issues[0] if issues else None,
+        "last_issue": issues[-1] if issues else None,
+        "settled_issues": len(issues),
         "block_issues": BLOCK_ISSUES,
         "forecasters": {},
     }
-    board["first_issue"] = board["issues"][0] if board["issues"] else None
-    board["last_issue"] = board["issues"][-1] if board["issues"] else None
-    board["settled_issues"] = len(board.pop("issues"))
-    for name, by_question in sorted(scores.items()):
+    for ident, own in sorted(scores.items(), key=lambda kv: labels[kv[0]]):
+        name, release = labels[ident]
         entry: dict[str, Any] = {
-            "questions": len(by_question),
-            "mean_log_score": fmean(by_question.values()),
+            "name": name,
+            "release": release,
+            "questions": len(own),
+            "mean_log_score": fmean(own.values()),
             "by_horizon": {
-                str(h): fmean(v for (_, hh, _), v in by_question.items() if hh == h)
+                str(h): fmean(v for (_, hh, _), v in own.items() if hh == h)
                 for h in HORIZONS
-                if any(hh == h for (_, hh, _) in by_question)
+                if any(hh == h for (_, hh, _) in own)
             },
             "vs": {},
         }
         for base in baselines:
-            if base == name or base not in scores:
+            if base == name:
                 continue
-            per_issue: dict[int, list[float]] = defaultdict(list)
-            for key, value in by_question.items():
-                if key in scores[base]:
-                    per_issue[key[0]].append(value - scores[base][key])
-            series = [fmean(per_issue[i]) for i in sorted(per_issue)]
-            if not series:
+            diffs: dict[int, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))  # issue -> h -> diffs
+            for (issue, h, asset), value in own.items():
+                other = by_name.get((issue, base))
+                if other is not None and (issue, h, asset) in scores[other]:
+                    diffs[issue][h].append(value - scores[other][(issue, h, asset)])
+            if not diffs:
                 continue
-            # Fewer than two blocks of issues cannot support an interval; report none rather than a false certainty.
-            ci = None
-            if len(series) >= 2 * BLOCK_ISSUES:
-                ci = list(interval(series, circular_block_indices(len(series), BLOCK_ISSUES)))
-            entry["vs"][base] = {"mean": fmean(series), "interval95": ci, "issues": len(series)}
-        board["forecasters"][name] = entry
+            complete = {
+                i: fmean(d for v in by_h.values() for d in v) for i, by_h in diffs.items() if len(by_h) == len(HORIZONS)
+            }
+            result: dict[str, Any] = (
+                _comparison(complete) if complete else {"mean": None, "interval95": None, "issues": 0}
+            )
+            result["by_horizon"] = {
+                str(h): _comparison({i: fmean(by_h[h]) for i, by_h in diffs.items() if h in by_h})
+                for h in HORIZONS
+                if any(h in by_h for by_h in diffs.values())
+            }
+            entry["vs"][base] = result
+        board["forecasters"][ident] = entry
     return board
