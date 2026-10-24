@@ -50,3 +50,31 @@ def test_wait_for_retries_until_the_deadline(
     monkeypatch.setattr(candles, "build", lambda start, end, cache_dir: make_panel(end_issue=ISSUE - 1))
     with pytest.raises(candles.CandlesNotReady):
         candles.wait_for(ISSUE, tmp_path, deadline=datetime.now(UTC), poll_seconds=0.01)
+
+
+def test_wait_for_rides_out_rate_limits(
+    monkeypatch: pytest.MonkeyPatch, make_panel: Callable[..., Panel], tmp_path: Path
+) -> None:
+    calls = []
+
+    def build(start: datetime, end: datetime, cache_dir: Path) -> Panel:
+        calls.append(start)
+        if len(calls) < 2:
+            raise RuntimeError("BTC-USD: rate-limited on every attempt")
+        return make_panel(end_issue=ISSUE)
+
+    monkeypatch.setattr(candles, "build", build)
+    deadline = datetime.now(UTC) + timedelta(seconds=5)
+    assert candles.wait_for(ISSUE, tmp_path, deadline=deadline, poll_seconds=0.01).ts[-1] == (ISSUE - 1) * 3600
+
+
+def test_the_current_issue_waits_until_the_exchange_opens_its_hour(
+    monkeypatch: pytest.MonkeyPatch, make_panel: Callable[..., Panel], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(candles, "current_issue", lambda now=None: ISSUE)
+    monkeypatch.setattr(candles, "build", lambda start, end, cache_dir: make_panel(end_issue=ISSUE))
+    monkeypatch.setattr(candles, "hour_started", lambda issue, cache_dir: False)
+    with pytest.raises(candles.CandlesNotReady, match="not opened"):
+        candles.fetch(ISSUE, tmp_path)
+    monkeypatch.setattr(candles, "hour_started", lambda issue, cache_dir: True)
+    assert int(candles.fetch(ISSUE, tmp_path).ts[-1]) == (ISSUE - 1) * 3600

@@ -34,11 +34,14 @@ units. The service reads its secrets from an environment file outside the reposi
 systemctl --user list-timers laplace-issue.timer    # next run
 journalctl --user -u laplace-issue -n 50            # last runs
 uv run laplace-engine status --data DATA_DIR        # sealed, committed, published, per hour
+uv run laplace-engine scoreboard --data DATA_DIR    # mean log scores and gains over the baselines
 ```
 
-Each run seals the issue (never resealing one that exists on disk), commits it if the window is still open (a rerun
-recovers an existing commitment instead of sending a second transaction), then publishes every committed issue that
-is not yet public. A missed hour stays a visible gap in the ledger.
+Each run holds a lock, seals the issue (never resealing one that exists on disk), commits it while the window is
+open (journaled, retried, and read back from the chain), reconciles older issues (recovering commitments that were
+never recorded, marking real gaps), publishes every committed issue that is not yet public after checking it against
+its commitment, then settles every question that has become due and publishes the settlements and the scoreboard.
+Every step is isolated and retried on the next run; `status` shows gaps and conflicts.
 
 | module | |
 |---|---|
@@ -49,6 +52,7 @@ is not yet public. A missed hour stays a visible gap in the ledger.
 | `candles.py`, `issue.py` | an issue's candles, its forecasts, root and manifest |
 | `verify.py` | the reference verifier |
 | `chain.py`, `publish.py` | committing to the ledger; publishing to `data.laplaceprotocol.com` |
+| `settle.py` | settling questions from the committed record and the scoreboard |
 | `vectors.py` | test vectors shared with the contracts (`python -m laplace_engine.vectors`) |
 
 The research package (`../research`) supplies the feed definition, the sandboxed evaluator and the baselines; this

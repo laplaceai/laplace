@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 from eth_account import Account
+from eth_hash.auto import keccak
 
 from laplace_engine import candles, chain, cli, publish, release
 from laplace_engine.baselines import NAIVE
@@ -86,3 +87,55 @@ def test_a_closed_window_leaves_the_issue_uncommitted(
     argv += ["--data", str(tmp_path / "data"), "--issue", str(ISSUE), "--workers", "1", "--commit"]
     assert cli.main(argv) == 1
     assert not (tmp_path / "data" / "issues" / str(ISSUE) / "commitment.json").exists()
+
+
+def test_reconcile_recovers_an_unrecorded_commitment_and_marks_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_panel: Callable[..., Panel]
+) -> None:
+    account = Account.create()
+    number = candles.current_issue()
+    node = FakeNode(account.address, head_timestamp=(number - 2) * 3600 + 100)
+    rpc = RPC("https://rpc.test", client=httpx.Client(transport=node.transport()))
+    rel = Release("r9", "test", (Program("naive", NAIVE, True, "baseline"),), ())
+    release.write(rel, tmp_path / "r9", tmp_path / "private")
+    monkeypatch.setattr(candles, "wait_for", lambda issue, cache_dir, deadline: make_panel(end_issue=issue))
+    base = ["issue", "--release", str(tmp_path / "r9"), "--private", str(tmp_path / "private")]
+    base += ["--data", str(tmp_path / "data"), "--workers", "1"]
+    for past in (number - 2, number - 1):  # two past hours, sealed in dry runs
+        assert cli.main([*base, "--issue", str(past)]) == 0
+    orphan = tmp_path / "data" / "issues" / str(number - 2)
+    manifest = (orphan / "manifest.json").read_bytes()
+    body = json.loads(manifest)
+    # The first one reached the chain, but its run died before recording it.
+    chain.Ledger(rpc).commit(
+        account,
+        number - 2,
+        bytes.fromhex(body["root"][2:]),
+        bytes(keccak(manifest)),
+        body["leaves"],
+        journal=orphan / cli.JOURNAL,
+    )
+    store = FakeStore()
+    monkeypatch.setattr(chain, "COMMIT_WINDOW_S", 3600)
+    monkeypatch.setattr(chain, "load_account", lambda path: account)
+    monkeypatch.setattr(chain, "RPC", lambda url: rpc)
+    monkeypatch.setattr(publish.R2, "from_env", classmethod(lambda cls: store))
+    monkeypatch.setenv("LAPLACE_COMMIT_KEY_FILE", str(tmp_path / "unused.json"))
+    node.advance(number * 3600 + 60)  # the current issue's commit lands inside its own window
+
+    assert cli.main([*base, "--commit", "--publish"]) == 0
+    assert json.loads((orphan / "commitment.json").read_bytes())["root"] == body["root"]
+    assert f"v1/issues/{number - 2}/forecasts.json" in store.objects  # recovered, so published
+    gap = tmp_path / "data" / "issues" / str(number - 1)
+    assert (gap / cli.GAP).exists()  # never committed: a visible gap, never published
+    assert not any(k.startswith(f"v1/issues/{number - 1}/") for k in store.objects)
+    assert len(node.sent) == 2  # the orphan's original transaction and this hour's; nothing was sent twice
+
+
+def test_only_one_run_at_a_time(tmp_path: Path) -> None:
+    with cli.run_lock(tmp_path / ".lock") as first:
+        assert first
+        with cli.run_lock(tmp_path / ".lock") as second:
+            assert not second
+    with cli.run_lock(tmp_path / ".lock") as again:
+        assert again

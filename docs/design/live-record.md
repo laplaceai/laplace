@@ -8,7 +8,8 @@ chain, and score the forecasts once they settle. Code: `engine/` ([README](../..
 
 ## An hour
 1. **:00:30 UTC.** The engine fetches the last 744 hourly candles of every asset and waits until the candle that
-   closed at the top of the hour is published for all of them (at most until :10).
+   closed at the top of the hour is published for all of them, and the exchange has opened the new hour by its own
+   clock (at most until :10).
 2. **Forecasts.** Every program of the release runs once per question in a fresh process that only ever reads the
    720 candles before the issue time (the same sandbox and past-only reader as in research). A program that fails
    is listed in the manifest and has no forecasts that hour; a pool needs all its members.
@@ -16,9 +17,19 @@ chain, and score the forecasts once they settle. Code: `engine/` ([README](../..
    the leaves are hashed into a tree. The manifest and the forecasts file are written to disk before anything is sent.
 4. **Commitment.** One transaction: `commit(issue, root, keccak256(manifest), leaves)`. The ledger accepts it only
    from the committer, only for an issue after the last one, and only inside the issue's 15-minute window, so the
-   block timestamp proves when the forecasts were sealed. A missed hour stays visible as a gap.
+   block timestamp proves when the forecasts were sealed. The signed transaction's hash is journaled before it is
+   sent, transient failures are retried until the window is about to close, and every commitment is read back from
+   the chain's own event. A missed hour stays visible as a gap.
 5. **Publication.** The manifest, the forecasts and the commitment's receipt go to
    `https://data.laplaceprotocol.com/v1/issues/<issue>/` (`manifest.json`, `forecasts.json`, `commitment.json`).
+6. **Settlement.** Every question that has become due is scored (`settlement-<h>h.json` next to its issue), and
+   `v1/scoreboard.json` is rebuilt from all settlements.
+
+Every run also reconciles the past: an issue whose commitment reached the chain without being recorded locally (a lost
+reply, a crash) is recovered from the chain and published; one that never reached it is marked as a gap. Each step is
+isolated, so a failure in one (an exchange outage during settlement, say) never stops the others, and anything left
+undone is retried on the next run, however old. Files are only published if they rebuild exactly the committed root
+and manifest hash.
 
 An issue is numbered by its hour: hours since the Unix epoch (issue 498,019 is 2026-10-24 19:00 UTC).
 
@@ -33,6 +44,18 @@ is part of the commitment.
 
 Forecasts are scored with the binned log score on the rounded forecast (`bps / 10,000`). Every bin holds at least one
 basis point, so no single outcome can cost more than log(10,000) ≈ 9.2 nats.
+
+## Settlement and scores
+A question of issue N at horizon h settles on the close of the candle that ends at the start of issue N + h, and that
+candle is issue N + h's last input candle: its close is in N + h's manifest, committed on-chain. So scores normally
+follow from committed files alone, and anyone can recompute them. If issue N + h was never committed, the question
+settles on the exchange's public candle instead, so a missing hour can never hide an outcome; the settlement file
+names its source either way. The committed prices themselves can be checked against the exchange's public candles.
+
+The scoreboard lists each forecaster's mean log score (overall and by horizon) and its paired gain over the naive,
+GARCH and HAR baselines on the questions both answered, issues weighted equally, with a 95% circular block-bootstrap
+interval over issues (72-hour blocks). Until two blocks of issues have settled it shows no interval at all: a few days
+of a small edge are a direction, not a verdict.
 
 ## Forecasters and releases
 A release ([`engine/releases/r1/release.json`](../../engine/releases/r1/release.json)) fixes the forecasters:

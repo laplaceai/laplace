@@ -37,7 +37,14 @@ class FakeNode:
         self.nonce = 0
         self.revert: str | None = None
         self.rate_limited = 0  # answer this many requests with HTTP 429 first
+        self.lost_replies = 0  # accept this many transactions but answer HTTP 502, as if the reply were lost
         self.requests = 0
+        self.known: set[str] = set()
+
+    def advance(self, timestamp: int) -> None:
+        """Mine an empty block at ``timestamp``; later transactions land in it."""
+        self.head += 1
+        self.timestamps[self.head] = timestamp
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -53,6 +60,9 @@ class FakeNode:
             reply["result"] = getattr(self, body["method"])(*body["params"])
         except JsonRpcError as exc:
             reply["error"] = {"code": 3, "message": str(exc), "data": exc.data}
+        if body["method"] == "eth_sendRawTransaction" and self.lost_replies and "result" in reply:
+            self.lost_replies -= 1
+            return httpx.Response(502)
         return httpx.Response(200, json=reply)
 
     # -- eth_* -------------------------------------------------------------------------------------------------
@@ -84,12 +94,15 @@ class FakeNode:
         return hex(10**17)
 
     def eth_sendRawTransaction(self, raw: str) -> str:
+        tx_hash = "0x" + bytes(keccak(bytes.fromhex(raw[2:]))).hex()
+        if tx_hash in self.known:
+            raise JsonRpcError("already known")
+        self.known.add(tx_hash)
         tx = TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
         tx["from"] = Account.recover_transaction(raw)
         data = bytes(tx["data"])
         assert data[:4] == COMMIT
         issue, root, manifest, leaves = decode(["uint64", "bytes32", "bytes32", "uint32"], data[4:])
-        tx_hash = "0x" + bytes(keccak(bytes.fromhex(raw[2:]))).hex()
         self.roots[issue] = root
         self.logs.append(
             {
@@ -100,16 +113,21 @@ class FakeNode:
                 "data": "0x" + encode(["bytes32", "bytes32", "uint32"], [root, manifest, leaves]).hex(),
             }
         )
-        self.receipts[tx_hash] = {"status": "0x1", "blockNumber": hex(self.head)}
+        self.receipts[tx_hash] = {"status": "0x1", "blockNumber": hex(self.head), "logs": [self.logs[-1]]}
         self.sent.append(tx)
         self.nonce += 1
         return tx_hash
+
+    def eth_getTransactionByHash(self, tx_hash: str) -> dict[str, Any] | None:
+        return {"hash": tx_hash} if tx_hash in self.known else None
 
     def eth_getTransactionReceipt(self, tx_hash: str) -> dict[str, Any] | None:
         return self.receipts.get(tx_hash)
 
     def eth_getLogs(self, query: dict[str, Any]) -> list[dict[str, Any]]:
         lo, hi = int(query["fromBlock"], 16), int(query["toBlock"], 16)
+        if hi > self.head:
+            raise JsonRpcError("block range extends beyond the current head")
         return [e for e in self.logs if e["topics"] == query["topics"] and lo <= int(e["blockNumber"], 16) <= hi]
 
 
