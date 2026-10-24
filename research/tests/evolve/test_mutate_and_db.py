@@ -50,7 +50,9 @@ class _FakeRunner:
             "usage": {"prompt_tokens": 5_000, "completion_tokens": 8_000},
         }
 
-    async def run(self, model: str, payload: dict[str, object]) -> dict[str, object]:
+    async def run(
+        self, model: str, payload: dict[str, object], metadata: dict[str, object] | None = None
+    ) -> dict[str, object]:
         return self._result
 
 

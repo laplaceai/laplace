@@ -23,7 +23,7 @@ from laplace_research import baselines
 from laplace_research.agents import MODEL_CONCURRENCY, Agent, ForecastParseError, forecast
 from laplace_research.cards import WEEK, Card, Outcome, build_card, settle
 from laplace_research.data.candles import HOUR, Candle, fetch_hourly
-from laplace_research.inference import AuthError, Credentials, InferenceError, WorkersAI
+from laplace_research.inference import AuthError, BudgetExceeded, Credentials, InferenceError, WorkersAI
 
 ASSETS = {"BTC-USD": "A", "ETH-USD": "B", "SOL-USD": "C"}
 BASE_RATE_DAYS = 30
@@ -106,7 +106,7 @@ async def _run_agents(rows: Sequence[dict[str, Any]], agents: Iterable[Agent], o
                 try:
                     f = await forecast(ai, agent, card)
                     row |= {"move24": f.move24, "big4": f.big4, "usage": f.usage}
-                except AuthError:
+                except (AuthError, BudgetExceeded):
                     raise
                 except (InferenceError, ForecastParseError) as exc:
                     row["error"] = str(exc)[:500]

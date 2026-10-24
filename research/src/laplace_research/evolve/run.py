@@ -28,7 +28,7 @@ from laplace_research.evolve.feed import finalize
 from laplace_research.evolve.islands import ISLANDS, SEED_PROGRAM
 from laplace_research.evolve.mutate import MUTATORS, NoProgram, Scored, build_prompt, propose
 from laplace_research.evolve.panel import Panel
-from laplace_research.inference import AuthError, Credentials, InferenceError, WorkersAI
+from laplace_research.inference import AuthError, BudgetExceeded, Credentials, InferenceError, WorkersAI
 
 TIME_LIMIT_S = 90
 MODEL_CONCURRENCY = {
@@ -175,9 +175,15 @@ class Run:
         record = partial(
             self.db.add_program, island_id=island_id, parent_id=parent.id, generation=g, mutator=mutator.name
         )
+        tags: dict[str, str | int] = {
+            "run": self.dir.name,
+            "island": str(island["name"]),
+            "generation": g,
+            "mutator": mutator.name,
+        }
         try:
-            proposal = await propose(ai, mutator, prompt)
-        except AuthError:
+            proposal = await propose(ai, mutator, prompt, tags)
+        except (AuthError, BudgetExceeded):
             raise
         except NoProgram as exc:  # answered but unusable: billed, so its cost is recorded
             record(code="", error=f"mutation: {exc}"[:400], cost_usd=exc.cost_usd)
