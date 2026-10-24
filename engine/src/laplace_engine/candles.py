@@ -9,11 +9,13 @@ from pathlib import Path
 
 import httpx
 
-from laplace_research.data.candles import HOUR
+from laplace_research.data.candles import HOUR, fetch_hourly
 from laplace_research.evolve.context import LOOKBACK
+from laplace_research.evolve.feed import product
 from laplace_research.evolve.panel import Panel, build
 
 WINDOW_HOURS = LOOKBACK + 24  # a day of spare history beyond what programs see
+SENTINEL = "BTC"  # trades every second; its first candle of the issue hour shows the previous hour has closed
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +33,21 @@ def current_issue(now: datetime | None = None) -> int:
     return int((now or datetime.now(UTC)).timestamp()) // HOUR
 
 
+def hour_started(issue: int, cache_dir: Path) -> bool:
+    """Whether the exchange has opened the issue hour's candle, i.e. the previous hour is closed by its own clock."""
+    start = issue_time(issue)
+    with httpx.Client(timeout=30.0, headers={"User-Agent": "laplace-engine"}) as client:
+        rows = fetch_hourly(product(SENTINEL), start, start + timedelta(hours=1), client=client, cache_dir=cache_dir)
+    return any(c.ts == issue * HOUR for c in rows)
+
+
 def fetch(issue: int, cache_dir: Path) -> Panel:
-    """The ``WINDOW_HOURS`` hours before the issue, ending with the candle that closed at the issue time."""
+    """The ``WINDOW_HOURS`` hours before the issue, ending with the candle that closed at the issue time. For the
+    current issue, the exchange must also have opened the issue hour, so a fast local clock can never seal on a candle
+    that is still trading."""
     end = issue_time(issue)
+    if issue >= current_issue() and not hour_started(issue, cache_dir):
+        raise CandlesNotReady("the exchange has not opened the issue hour yet")
     panel = build(end - timedelta(hours=WINDOW_HOURS), end, cache_dir)
     if len(panel.ts) < LOOKBACK:
         raise CandlesNotReady(f"only {len(panel.ts)} shared hours before issue {issue}")
@@ -48,7 +62,7 @@ def wait_for(issue: int, cache_dir: Path, *, deadline: datetime, poll_seconds: f
     while True:
         try:
             return fetch(issue, cache_dir)
-        except (CandlesNotReady, httpx.HTTPError, ValueError) as exc:
+        except (CandlesNotReady, httpx.HTTPError, ValueError, RuntimeError) as exc:  # RuntimeError: rate limited
             if datetime.now(UTC) + timedelta(seconds=poll_seconds) > deadline:
                 raise
             log.info("issue %d: candles not ready (%s); retrying in %.0fs", issue, exc, poll_seconds)
