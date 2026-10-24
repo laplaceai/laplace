@@ -138,6 +138,17 @@ def _garch_variance(r: FloatArray, omega: float, alpha: float, beta: float) -> F
     return out
 
 
+def _t_log_density(x: FloatArray, variance: FloatArray, nu: float) -> FloatArray:
+    """Log density of a Student-t distribution with ``nu > 2`` degrees of freedom, rescaled to ``variance``."""
+    out: FloatArray = (
+        special.gammaln((nu + 1) / 2)
+        - special.gammaln(nu / 2)
+        - 0.5 * np.log(np.pi * (nu - 2) * variance)
+        - (nu + 1) / 2 * np.log1p(x**2 / ((nu - 2) * variance))
+    )
+    return out
+
+
 def _garch_fit(r: FloatArray) -> tuple[float, float, float]:
     var = float(np.var(r))
 
@@ -147,14 +158,7 @@ def _garch_fit(r: FloatArray) -> tuple[float, float, float]:
             return 1e12
         omega = var * (1 - a - b)
         v = np.maximum(_garch_variance(r[:-1], omega, a, b), 1e-14)
-        z2 = r[1:] ** 2 / (v * (nu - 2) / nu)
-        ll = (
-            special.gammaln((nu + 1) / 2)
-            - special.gammaln(nu / 2)
-            - 0.5 * np.log(np.pi * (nu - 2) / nu * v)
-            - (nu + 1) / 2 * np.log1p(z2 / nu)
-        )
-        return float(-np.sum(ll))
+        return float(-np.sum(_t_log_density(r[1:], v, nu)))
 
     best = optimize.minimize(nll, x0=np.array([0.05, 0.9, 5.0]), method="Nelder-Mead", options={"maxiter": 600})
     a, b, _ = best.x
